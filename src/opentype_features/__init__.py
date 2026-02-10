@@ -3,9 +3,10 @@ import argparse
 import os
 from fontTools.ttLib import TTFont
 from fpdf import FPDF
+from opentype_features.feature_names import FEATURE_NAMES
 
 def get_tag_name(tag):
-    return tag
+    return FEATURE_NAMES.get(tag, tag)
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Analyze OpenType features in a font file.")
@@ -170,6 +171,7 @@ def main() -> None:
 
     for tag in sorted(feature_substitutions.keys()):
         all_substitutions = feature_substitutions[tag]
+        friendly_name = get_tag_name(tag)
         
         # Deduplicate substitutions
         unique_subs = []
@@ -183,13 +185,13 @@ def main() -> None:
         all_substitutions = unique_subs
 
         if all_substitutions:
-            print(f"\nFeature: {tag}")
+            print(f"\nFeature: {tag} ({friendly_name})")
             for s in all_substitutions:
                 print(f"  {s['in_glyphs']} ({s['in_chars']}) -> {s['out_glyphs']} ({s['out_chars']})")
 
         if pdf:
             pdf.set_font("TargetFont", "", 12)
-            pdf.cell(0, 10, f"Feature: {tag}", ln=True)
+            pdf.cell(0, 10, f"Feature: {tag} ({friendly_name})", ln=True)
             pdf.set_font("TargetFont", "", 10)
             if all_substitutions:
                 # Column widths
