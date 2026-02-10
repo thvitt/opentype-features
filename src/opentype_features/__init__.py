@@ -17,60 +17,75 @@ LOOKUP_TYPE_ALTERNATE = 3
 LOOKUP_TYPE_LIGATURE = 4
 LOOKUP_TYPE_EXTENSION = 7
 
+# Private Use Area for rendering unmapped glyphs
+PUA_START = 0xE000
+
 
 def get_tag_name(tag: str) -> str:
     """Return the friendly name for an OpenType feature tag."""
     return FEATURE_NAMES.get(tag, tag)
 
 
-def get_glyph_info(glyph_name: str, reverse_cmap: dict[str, int]) -> tuple[str | None, str]:
+def get_glyph_info(
+    glyph_name: str, reverse_cmap: dict[str, int], pua_map: dict[str, str]
+) -> tuple[str, str]:
     """Return the character and glyph name for a given glyph name."""
-    char = chr(reverse_cmap[glyph_name]) if glyph_name in reverse_cmap else None
-    return char, glyph_name
+    if glyph_name in reverse_cmap:
+        return chr(reverse_cmap[glyph_name]), glyph_name
+
+    # If not in cmap, use a PUA character for rendering
+    if glyph_name not in pua_map:
+        pua_char = chr(PUA_START + len(pua_map))
+        pua_map[glyph_name] = pua_char
+
+    return pua_map[glyph_name], glyph_name
 
 
 def get_descriptive_name(
     glyph_name: str, substitution_info: dict[str, Any] | None = None
 ) -> str:
     """Generate a descriptive name for a glyph if it has a generic name."""
-    if (
-        glyph_name.startswith("glyph")
-        and glyph_name[5:].isdigit()
-        and substitution_info
-    ):
+    # Normalize generic names (e.g., glyph00499 -> glyph499)
+    name = glyph_name
+    if name.startswith("glyph") and name[5:].isdigit():
+        name = f"glyph{int(name[5:])}"
+
+    if substitution_info:
         if substitution_info["type"] == "ligature":
             return "_".join(substitution_info["components"]) + "." + substitution_info["tag"]
         if substitution_info["type"] == "single":
             return substitution_info["input"] + "." + substitution_info["tag"]
         if substitution_info["type"] == "alternate":
             return substitution_info["input"] + ".alt." + substitution_info["tag"]
-    return glyph_name
+    return name
 
 
 def _process_single_subtable(
     subtable: Any,  # noqa: ANN401
     tag: str,
     reverse_cmap: dict[str, int],
+    pua_map: dict[str, str],
 ) -> list[dict[str, Any]]:
     """Process a single substitution subtable."""
     substitutions = []
     if hasattr(subtable, "mapping"):
         for input_glyph, output_glyph in subtable.mapping.items():
-            in_char, in_name = get_glyph_info(input_glyph, reverse_cmap)
-            out_char, out_name = get_glyph_info(output_glyph, reverse_cmap)
-            if in_char:
-                display_out_name = get_descriptive_name(
-                    out_name, {"type": "single", "input": in_name, "tag": tag}
-                )
-                substitutions.append(
-                    {
-                        "in_chars": in_char,
-                        "in_glyphs": in_name,
-                        "out_chars": out_char or in_char,
-                        "out_glyphs": display_out_name,
-                        "tag": tag,
-                    }
-                )
+            in_char, in_name = get_glyph_info(input_glyph, reverse_cmap, pua_map)
+            out_char, out_name = get_glyph_info(output_glyph, reverse_cmap, pua_map)
+            # We always include these now that we have PUA for rendering
+            display_in_name = get_descriptive_name(in_name)
+            display_out_name = get_descriptive_name(
+                out_name, {"type": "single", "input": display_in_name, "tag": tag}
+            )
+            substitutions.append(
+                {
+                    "in_chars": in_char,
+                    "in_glyphs": display_in_name,
+                    "out_chars": out_char,
+                    "out_glyphs": display_out_name,
+                    "tag": tag,
+                }
+            )
     return substitutions
 
 
@@ -78,25 +93,28 @@ def _process_multiple_subtable(
     subtable: Any,  # noqa: ANN401
     tag: str,
     reverse_cmap: dict[str, int],
+    pua_map: dict[str, str],
 ) -> list[dict[str, Any]]:
     """Process a multiple substitution subtable."""
     substitutions = []
     if hasattr(subtable, "mapping"):
         for input_glyph, output_glyphs in subtable.mapping.items():
-            in_char, in_name = get_glyph_info(input_glyph, reverse_cmap)
-            if in_char:
-                out_info = [get_glyph_info(g, reverse_cmap) for g in output_glyphs]
-                out_chars = "".join(c or f"<{n}>" for c, n in out_info)
-                out_names = " ".join(n for c, n in out_info)
-                substitutions.append(
-                    {
-                        "in_chars": in_char,
-                        "in_glyphs": in_name,
-                        "out_chars": out_chars,
-                        "out_glyphs": out_names,
-                        "tag": tag,
-                    }
-                )
+            in_char, in_name = get_glyph_info(input_glyph, reverse_cmap, pua_map)
+            display_in_name = get_descriptive_name(in_name)
+            out_info = [
+                get_glyph_info(g, reverse_cmap, pua_map) for g in output_glyphs
+            ]
+            out_chars = "".join(c for c, n in out_info)
+            out_names = " ".join(get_descriptive_name(n) for c, n in out_info)
+            substitutions.append(
+                {
+                    "in_chars": in_char,
+                    "in_glyphs": display_in_name,
+                    "out_chars": out_chars,
+                    "out_glyphs": out_names,
+                    "tag": tag,
+                }
+            )
     return substitutions
 
 
@@ -104,6 +122,7 @@ def _process_ligature_subtable(
     subtable: Any,  # noqa: ANN401
     tag: str,
     reverse_cmap: dict[str, int],
+    pua_map: dict[str, str],
 ) -> list[dict[str, Any]]:
     """Process a ligature substitution subtable."""
     substitutions = []
@@ -112,26 +131,27 @@ def _process_ligature_subtable(
             for lig in ligatures:
                 components = [first_glyph, *lig.Component]
                 output = lig.LigGlyph
-                comp_info = [get_glyph_info(c, reverse_cmap) for c in components]
+                comp_info = [
+                    get_glyph_info(c, reverse_cmap, pua_map) for c in components
+                ]
 
-                comp_chars = "".join(c for c, n in comp_info if c)
-                comp_names = [n for c, n in comp_info]
-                out_char, out_name = get_glyph_info(output, reverse_cmap)
+                comp_chars = "".join(c for c, n in comp_info)
+                comp_names = [get_descriptive_name(n) for c, n in comp_info]
+                out_char, out_name = get_glyph_info(output, reverse_cmap, pua_map)
 
-                if comp_chars:
-                    display_out_name = get_descriptive_name(
-                        out_name,
-                        {"type": "ligature", "components": comp_names, "tag": tag},
-                    )
-                    substitutions.append(
-                        {
-                            "in_chars": comp_chars,
-                            "in_glyphs": " ".join(comp_names),
-                            "out_chars": out_char or comp_chars,
-                            "out_glyphs": display_out_name,
-                            "tag": tag,
-                        }
-                    )
+                display_out_name = get_descriptive_name(
+                    out_name,
+                    {"type": "ligature", "components": comp_names, "tag": tag},
+                )
+                substitutions.append(
+                    {
+                        "in_chars": comp_chars,
+                        "in_glyphs": " ".join(comp_names),
+                        "out_chars": out_char,
+                        "out_glyphs": display_out_name,
+                        "tag": tag,
+                    }
+                )
     return substitutions
 
 
@@ -139,26 +159,27 @@ def _process_alternate_subtable(
     subtable: Any,  # noqa: ANN401
     tag: str,
     reverse_cmap: dict[str, int],
+    pua_map: dict[str, str],
 ) -> list[dict[str, Any]]:
     """Process an alternate substitution subtable."""
     substitutions = []
     if hasattr(subtable, "alternates"):
         for input_glyph, alternates in subtable.alternates.items():
-            in_char, in_name = get_glyph_info(input_glyph, reverse_cmap)
-            if in_char:
-                out_char, out_name = get_glyph_info(alternates[0], reverse_cmap)
-                display_out_name = get_descriptive_name(
-                    out_name, {"type": "alternate", "input": in_name, "tag": tag}
-                )
-                substitutions.append(
-                    {
-                        "in_chars": in_char,
-                        "in_glyphs": in_name,
-                        "out_chars": out_char or in_char,
-                        "out_glyphs": display_out_name,
-                        "tag": tag,
-                    }
-                )
+            in_char, in_name = get_glyph_info(input_glyph, reverse_cmap, pua_map)
+            display_in_name = get_descriptive_name(in_name)
+            out_char, out_name = get_glyph_info(alternates[0], reverse_cmap, pua_map)
+            display_out_name = get_descriptive_name(
+                out_name, {"type": "alternate", "input": display_in_name, "tag": tag}
+            )
+            substitutions.append(
+                {
+                    "in_chars": in_char,
+                    "in_glyphs": display_in_name,
+                    "out_chars": out_char,
+                    "out_glyphs": display_out_name,
+                    "tag": tag,
+                }
+            )
     return substitutions
 
 
@@ -167,16 +188,17 @@ def process_subtable(
     subtable: Any,  # noqa: ANN401
     tag: str,
     reverse_cmap: dict[str, int],
+    pua_map: dict[str, str],
 ) -> list[dict[str, Any]]:
     """Extract substitutions from a GSUB subtable."""
     if lookup_type == LOOKUP_TYPE_SINGLE:
-        return _process_single_subtable(subtable, tag, reverse_cmap)
+        return _process_single_subtable(subtable, tag, reverse_cmap, pua_map)
     if lookup_type == LOOKUP_TYPE_MULTIPLE:
-        return _process_multiple_subtable(subtable, tag, reverse_cmap)
+        return _process_multiple_subtable(subtable, tag, reverse_cmap, pua_map)
     if lookup_type == LOOKUP_TYPE_LIGATURE:
-        return _process_ligature_subtable(subtable, tag, reverse_cmap)
+        return _process_ligature_subtable(subtable, tag, reverse_cmap, pua_map)
     if lookup_type == LOOKUP_TYPE_ALTERNATE:
-        return _process_alternate_subtable(subtable, tag, reverse_cmap)
+        return _process_alternate_subtable(subtable, tag, reverse_cmap, pua_map)
     return []
 
 
@@ -184,6 +206,7 @@ def process_lookup(
     lookup: Any,  # noqa: ANN401
     tag: str,
     reverse_cmap: dict[str, int],
+    pua_map: dict[str, str],
 ) -> list[dict[str, Any]]:
     """Extract substitutions from a GSUB lookup."""
     substitutions = []
@@ -192,12 +215,14 @@ def process_lookup(
             ext_lookup_type = subtable.ExtensionLookupType
             actual_subtable = subtable.ExtSubTable
             substitutions.extend(
-                process_subtable(ext_lookup_type, actual_subtable, tag, reverse_cmap)
+                process_subtable(
+                    ext_lookup_type, actual_subtable, tag, reverse_cmap, pua_map
+                )
             )
     else:
         for subtable in lookup.SubTable:
             substitutions.extend(
-                process_subtable(lookup.LookupType, subtable, tag, reverse_cmap)
+                process_subtable(lookup.LookupType, subtable, tag, reverse_cmap, pua_map)
             )
     return substitutions
 
@@ -318,6 +343,7 @@ def main() -> None:
 
     cmap = font.getBestCmap()
     reverse_cmap = {v: k for k, v in cmap.items()}
+    pua_map: dict[str, str] = {}
 
     print(f"Analyzing font: {font_path}")
     print("-" * 40)
@@ -332,7 +358,7 @@ def main() -> None:
             if lookup_index < len(lookup_list):
                 lookup = lookup_list[lookup_index]
                 feature_substitutions[tag].extend(
-                    process_lookup(lookup, tag, reverse_cmap)
+                    process_lookup(lookup, tag, reverse_cmap, pua_map)
                 )
 
     print_console_report(feature_substitutions)
