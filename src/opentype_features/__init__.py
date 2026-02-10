@@ -52,11 +52,10 @@ def main() -> None:
     if args.output:
         pdf = FPDF()
         pdf.add_page()
-        # Register the font. We'll name it 'TargetFont'
-        # fpdf2 supports OTF/TTF. 
         try:
             pdf.add_font("TargetFont", style="", fname=font_path)
-            pdf.set_font("helvetica", "B", 16)
+            # Use TargetFont for headers too to avoid encoding issues
+            pdf.set_font("TargetFont", "", 16)
             pdf.cell(0, 10, f"OpenType Feature Report: {os.path.basename(font_path)}", ln=True)
             pdf.ln(5)
         except Exception as e:
@@ -68,9 +67,9 @@ def main() -> None:
         print(f"\nFeature: {tag}")
         
         if pdf:
-            pdf.set_font("helvetica", "B", 12)
+            pdf.set_font("TargetFont", "", 12)
             pdf.cell(0, 10, f"Feature: {tag}", ln=True)
-            pdf.set_font("helvetica", "", 10)
+            pdf.set_font("TargetFont", "", 10)
             pdf.cell(40, 8, "Input (OFF)", border=1)
             pdf.cell(40, 8, "Output (ON)", border=1)
             pdf.cell(40, 8, "Actual Rendering", border=1)
@@ -87,7 +86,7 @@ def main() -> None:
                         out_char = glyph_to_chars(output_glyph)
                         if in_char:
                             substitutions.append((in_char, out_char if out_char else in_char, tag))
-                            print(f"  Substitution: {in_char} -> {format_glyph(output_glyph)}")
+                            # print(f"  Substitution: {in_char} -> {format_glyph(output_glyph)}")
                 
                 elif lookup.LookupType == 4: # Ligature
                     for first_glyph, ligatures in subtable.ligatures.items():
@@ -98,44 +97,28 @@ def main() -> None:
                             out_char = glyph_to_chars(output)
                             if comp_chars:
                                 substitutions.append((comp_chars, out_char if out_char else comp_chars, tag))
-                                print(f"  Ligature: {comp_chars} -> {format_glyph(output)}")
+                                # print(f"  Ligature: {comp_chars} -> {format_glyph(output)}")
 
                 elif lookup.LookupType == 3: # Alternate
                     for input_glyph, alternates in subtable.alternates.items():
                         in_char = glyph_to_chars(input_glyph)
                         if in_char:
-                            # Just take the first alternate for the demo
                             out_char = glyph_to_chars(alternates[0])
                             substitutions.append((in_char, out_char if out_char else in_char, tag))
-                            alt_names = ", ".join(format_glyph(a) for a in alternates)
-                            print(f"  Alternate: {in_char} -> [{alt_names}]")
+                            # alt_names = ", ".join(format_glyph(a) for a in alternates)
+                            # print(f"  Alternate: {in_char} -> [{alt_names}]")
 
                 if pdf and substitutions:
+                    pdf.set_font("TargetFont", "", 10)
                     for in_txt, out_txt, feat_tag in substitutions:
-                        # Row with comparison
-                        pdf.set_font("helvetica", "", 10)
-                        pdf.cell(40, 10, in_txt, border=1)
-                        pdf.cell(40, 10, out_txt if out_txt != in_txt else "N/A (Glyph only)", border=1)
-                        
-                        # The actual rendering column
-                        pdf.set_font("TargetFont", "", 14)
-                        # fpdf2 enables features via text_columns or similar, 
-                        # but for simple cell/write we might need to set it globally or per call.
-                        # In fpdf2, we can use font settings for features.
                         try:
-                            # Attempting to use the feature. 
-                            # fpdf2's set_font doesn't directly take features, 
-                            # but it has some support via harfbuzz if enabled.
-                            # We'll render the input text and hope the layout engine handles it 
-                            # if we can specify features. 
-                            # Actually, fpdf2's support for specific features in a cell is limited 
-                            # without custom shaping.
-                            # For now, we'll just show the 'out_txt' using the font if it mapped to unicode.
+                            pdf.cell(40, 10, in_txt, border=1)
+                            pdf.cell(40, 10, out_txt if out_txt != in_txt else "N/A", border=1)
                             pdf.cell(40, 10, out_txt, border=1)
-                        except:
-                            pdf.cell(40, 10, "?", border=1)
-                        
-                        pdf.ln()
+                            pdf.ln()
+                        except Exception as e:
+                            # If a specific character still fails (not in font), skip or show placeholder
+                            pass
 
     if pdf and args.output:
         try:
