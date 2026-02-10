@@ -42,23 +42,17 @@ def get_glyph_info(
     return pua_map[glyph_name], glyph_name
 
 
-def get_descriptive_name(
-    glyph_name: str, substitution_info: dict[str, Any] | None = None
-) -> str:
-    """Generate a descriptive name for a glyph if it has a generic name."""
-    # Normalize generic names (e.g., glyph00499 -> glyph499)
-    name = glyph_name
-    if name.startswith("glyph") and name[5:].isdigit():
-        name = f"glyph{int(name[5:])}"
-
-    if substitution_info:
-        if substitution_info["type"] == "ligature":
-            return "_".join(substitution_info["components"]) + "." + substitution_info["tag"]
-        if substitution_info["type"] == "single":
-            return substitution_info["input"] + "." + substitution_info["tag"]
-        if substitution_info["type"] == "alternate":
-            return substitution_info["input"] + ".alt." + substitution_info["tag"]
-    return name
+def get_display_name(glyph_name: str, reverse_cmap: dict[str, int]) -> str:
+    """Generate a display name for a glyph following user rules."""
+    # If fontTools generated a generic name (e.g., glyph00499)
+    if glyph_name.startswith("glyph") and glyph_name[5:].isdigit():
+        if glyph_name in reverse_cmap:
+            codepoint = reverse_cmap[glyph_name]
+            return f"U+{codepoint:04X}"
+        # No name, no unicode -> glyph number (normalized)
+        return f"glyph{int(glyph_name[5:])}"
+    # It has a specific name
+    return glyph_name
 
 
 def _process_single_subtable(
@@ -73,17 +67,13 @@ def _process_single_subtable(
         for input_glyph, output_glyph in subtable.mapping.items():
             in_char, in_name = get_glyph_info(input_glyph, reverse_cmap, pua_map)
             out_char, out_name = get_glyph_info(output_glyph, reverse_cmap, pua_map)
-            # We always include these now that we have PUA for rendering
-            display_in_name = get_descriptive_name(in_name)
-            display_out_name = get_descriptive_name(
-                out_name, {"type": "single", "input": display_in_name, "tag": tag}
-            )
+
             substitutions.append(
                 {
                     "in_chars": in_char,
-                    "in_glyphs": display_in_name,
+                    "in_glyphs": get_display_name(in_name, reverse_cmap),
                     "out_chars": out_char,
-                    "out_glyphs": display_out_name,
+                    "out_glyphs": get_display_name(out_name, reverse_cmap),
                     "tag": tag,
                 }
             )
@@ -101,16 +91,15 @@ def _process_multiple_subtable(
     if hasattr(subtable, "mapping"):
         for input_glyph, output_glyphs in subtable.mapping.items():
             in_char, in_name = get_glyph_info(input_glyph, reverse_cmap, pua_map)
-            display_in_name = get_descriptive_name(in_name)
             out_info = [
                 get_glyph_info(g, reverse_cmap, pua_map) for g in output_glyphs
             ]
             out_chars = "".join(c for c, n in out_info)
-            out_names = " ".join(get_descriptive_name(n) for c, n in out_info)
+            out_names = " ".join(get_display_name(n, reverse_cmap) for c, n in out_info)
             substitutions.append(
                 {
                     "in_chars": in_char,
-                    "in_glyphs": display_in_name,
+                    "in_glyphs": get_display_name(in_name, reverse_cmap),
                     "out_chars": out_chars,
                     "out_glyphs": out_names,
                     "tag": tag,
@@ -137,19 +126,15 @@ def _process_ligature_subtable(
                 ]
 
                 comp_chars = "".join(c for c, n in comp_info)
-                comp_names = [get_descriptive_name(n) for c, n in comp_info]
+                comp_names = [get_display_name(n, reverse_cmap) for c, n in comp_info]
                 out_char, out_name = get_glyph_info(output, reverse_cmap, pua_map)
 
-                display_out_name = get_descriptive_name(
-                    out_name,
-                    {"type": "ligature", "components": comp_names, "tag": tag},
-                )
                 substitutions.append(
                     {
                         "in_chars": comp_chars,
                         "in_glyphs": " ".join(comp_names),
                         "out_chars": out_char,
-                        "out_glyphs": display_out_name,
+                        "out_glyphs": get_display_name(out_name, reverse_cmap),
                         "tag": tag,
                     }
                 )
@@ -167,17 +152,13 @@ def _process_alternate_subtable(
     if hasattr(subtable, "alternates"):
         for input_glyph, alternates in subtable.alternates.items():
             in_char, in_name = get_glyph_info(input_glyph, reverse_cmap, pua_map)
-            display_in_name = get_descriptive_name(in_name)
             out_char, out_name = get_glyph_info(alternates[0], reverse_cmap, pua_map)
-            display_out_name = get_descriptive_name(
-                out_name, {"type": "alternate", "input": display_in_name, "tag": tag}
-            )
             substitutions.append(
                 {
                     "in_chars": in_char,
-                    "in_glyphs": display_in_name,
+                    "in_glyphs": get_display_name(in_name, reverse_cmap),
                     "out_chars": out_char,
-                    "out_glyphs": display_out_name,
+                    "out_glyphs": get_display_name(out_name, reverse_cmap),
                     "tag": tag,
                 }
             )
