@@ -2,6 +2,7 @@
 
 import argparse
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -227,14 +228,33 @@ def process_lookup(
     return substitutions
 
 
+def create_modified_font(font_path: Path, pua_map: dict[str, str]) -> Path:
+    """Create a temporary font file with unmapped glyphs added to the cmap."""
+    font = TTFont(str(font_path))
+    # Add mappings to all Unicode cmaps found
+    for table in font["cmap"].tables:
+        if table.isUnicode():
+            for name, char in pua_map.items():
+                table.cmap[ord(char)] = name
+
+    # Save to a temporary file
+    with tempfile.NamedTemporaryFile(suffix=".ttf", delete=False) as tmp:
+        temp_path = Path(tmp.name)
+    font.save(str(temp_path))
+    return temp_path
+
+
 def render_pdf_report(
-    font_path: Path, feature_substitutions: dict[str, list[dict[str, Any]]], output_path: Path
+    font_path: Path,
+    feature_substitutions: dict[str, list[dict[str, Any]]],
+    output_path: Path,
+    actual_font_path: Path,
 ) -> None:
     """Generate a PDF report of OpenType features."""
     pdf = FPDF()
     pdf.add_page()
     try:
-        pdf.add_font("TargetFont", style="", fname=str(font_path))
+        pdf.add_font("TargetFont", style="", fname=str(actual_font_path))
         pdf.set_font("TargetFont", "", 16)
         pdf.cell(0, 10, f"OpenType Feature Report: {font_path.name}", ln=True)
         pdf.ln(5)
@@ -364,7 +384,17 @@ def main() -> None:
     print_console_report(feature_substitutions)
 
     if args.output:
-        render_pdf_report(font_path, feature_substitutions, Path(args.output))
+        actual_font_path = font_path
+        if pua_map:
+            actual_font_path = create_modified_font(font_path, pua_map)
+
+        try:
+            render_pdf_report(
+                font_path, feature_substitutions, Path(args.output), actual_font_path
+            )
+        finally:
+            if actual_font_path != font_path and actual_font_path.exists():
+                actual_font_path.unlink()
 
 
 if __name__ == "__main__":
