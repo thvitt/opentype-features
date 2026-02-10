@@ -7,7 +7,9 @@ authors = [
     { name = "Thorsten Vitt", email = "thorsten.vitt@uni-wuerzburg.de" }
 ]
 requires-python = ">=3.14"
-dependencies = []
+dependencies = [
+    "fonttools>=4.61.1",
+]
 
 [project.scripts]
 opentype-features = "opentype_features:main"
