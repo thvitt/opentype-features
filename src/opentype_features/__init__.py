@@ -36,14 +36,9 @@ def main() -> None:
     cmap = font.getBestCmap()
     reverse_cmap = {v: k for k, v in cmap.items()}
 
-    def glyph_to_chars(glyph_name):
-        if glyph_name in reverse_cmap:
-            return chr(reverse_cmap[glyph_name])
-        return None # Return None if no direct unicode mapping
-
-    def format_glyph(glyph_name):
-        c = glyph_to_chars(glyph_name)
-        return c if c else f"<{glyph_name}>"
+    def get_glyph_info(glyph_name):
+        char = chr(reverse_cmap[glyph_name]) if glyph_name in reverse_cmap else None
+        return char, glyph_name
 
     print(f"Analyzing font: {font_path}")
     print("-" * 40)
@@ -62,23 +57,41 @@ def main() -> None:
             print(f"Warning: Could not embed font for PDF: {e}")
             pdf = None
 
+    def format_glyph_info(glyph_name):
+        char, name = get_glyph_info(glyph_name)
+        return char if char else f"<{name}>"
+
     def process_subtable(lookup_type, subtable, tag):
         substitutions = []
         if lookup_type == 1: # Single
             if hasattr(subtable, 'mapping'):
                 for input_glyph, output_glyph in subtable.mapping.items():
-                    in_char = glyph_to_chars(input_glyph)
-                    out_char = glyph_to_chars(output_glyph)
+                    in_char, in_name = get_glyph_info(input_glyph)
+                    out_char, out_name = get_glyph_info(output_glyph)
                     if in_char:
-                        substitutions.append((in_char, out_char if out_char else f"<{output_glyph}>", tag))
+                        substitutions.append({
+                            'in_chars': in_char,
+                            'in_glyphs': in_name,
+                            'out_chars': out_char if out_char else in_char, # Use input char for rendering if output has no unicode
+                            'out_glyphs': out_name,
+                            'tag': tag
+                        })
         
         elif lookup_type == 2: # Multiple
             if hasattr(subtable, 'mapping'):
                 for input_glyph, output_glyphs in subtable.mapping.items():
-                    in_char = glyph_to_chars(input_glyph)
+                    in_char, in_name = get_glyph_info(input_glyph)
                     if in_char:
-                        out_chars = "".join(glyph_to_chars(g) if glyph_to_chars(g) else f"<{g}>" for g in output_glyphs)
-                        substitutions.append((in_char, out_chars, tag))
+                        out_info = [get_glyph_info(g) for g in output_glyphs]
+                        out_chars = "".join(c if c else f"<{n}>" for c, n in out_info)
+                        out_names = " ".join(n for c, n in out_info)
+                        substitutions.append({
+                            'in_chars': in_char,
+                            'in_glyphs': in_name,
+                            'out_chars': out_chars,
+                            'out_glyphs': out_names,
+                            'tag': tag
+                        })
 
         elif lookup_type == 4: # Ligature
             if hasattr(subtable, 'ligatures'):
@@ -86,18 +99,34 @@ def main() -> None:
                     for lig in ligatures:
                         components = [first_glyph] + lig.Component
                         output = lig.LigGlyph
-                        comp_chars = "".join(glyph_to_chars(c) if glyph_to_chars(c) else f"<{c}>" for c in components)
-                        out_char = glyph_to_chars(output)
+                        comp_info = [get_glyph_info(c) for c in components]
+                        
+                        comp_chars = "".join(c for c, n in comp_info if c)
+                        comp_names = " ".join(n for c, n in comp_info)
+                        out_char, out_name = get_glyph_info(output)
+                        
                         if comp_chars:
-                            substitutions.append((comp_chars, out_char if out_char else f"<{output}>", tag))
+                            substitutions.append({
+                                'in_chars': comp_chars,
+                                'in_glyphs': comp_names,
+                                'out_chars': out_char if out_char else comp_chars,
+                                'out_glyphs': out_name,
+                                'tag': tag
+                            })
 
         elif lookup_type == 3: # Alternate
             if hasattr(subtable, 'alternates'):
                 for input_glyph, alternates in subtable.alternates.items():
-                    in_char = glyph_to_chars(input_glyph)
+                    in_char, in_name = get_glyph_info(input_glyph)
                     if in_char:
-                        out_char = glyph_to_chars(alternates[0])
-                        substitutions.append((in_char, out_char if out_char else f"<{alternates[0]}>", tag))
+                        out_char, out_name = get_glyph_info(alternates[0])
+                        substitutions.append({
+                            'in_chars': in_char,
+                            'in_glyphs': in_name,
+                            'out_chars': out_char if out_char else in_char,
+                            'out_glyphs': out_name,
+                            'tag': tag
+                        })
         return substitutions
 
     def process_lookup(lookup, tag):
@@ -131,31 +160,37 @@ def main() -> None:
         unique_subs = []
         seen = set()
         for s in all_substitutions:
-            if s not in seen:
+            # Create a hashable version for the 'seen' set
+            s_tuple = (s['in_glyphs'], s['out_glyphs'], s['tag'])
+            if s_tuple not in seen:
                 unique_subs.append(s)
-                seen.add(s)
+                seen.add(s_tuple)
         all_substitutions = unique_subs
 
         if all_substitutions:
             print(f"\nFeature: {tag}")
-            for in_txt, out_txt, feat_tag in all_substitutions:
-                print(f"  {in_txt} -> {out_txt}")
+            for s in all_substitutions:
+                print(f"  {s['in_glyphs']} ({s['in_chars']}) -> {s['out_glyphs']} ({s['out_chars']})")
 
         if pdf:
             pdf.set_font("TargetFont", "", 12)
             pdf.cell(0, 10, f"Feature: {tag}", ln=True)
             pdf.set_font("TargetFont", "", 10)
             if all_substitutions:
-                pdf.cell(40, 8, "Input (OFF)", border=1)
-                pdf.cell(40, 8, "Output (ON)", border=1)
-                pdf.cell(40, 8, "Actual Rendering", border=1)
+                # Column widths
+                w = [45, 35, 35, 45]
+                pdf.cell(w[0], 8, "Source Glyphs", border=1)
+                pdf.cell(w[1], 8, "OFF (Render)", border=1)
+                pdf.cell(w[2], 8, "ON (Render)", border=1)
+                pdf.cell(w[3], 8, "Target Glyph(s)", border=1)
                 pdf.ln()
 
-                for in_txt, out_txt, feat_tag in all_substitutions:
+                for s in all_substitutions:
                     try:
-                        pdf.cell(40, 10, in_txt, border=1)
-                        pdf.cell(40, 10, out_txt if out_txt != in_txt else "N/A", border=1)
-                        pdf.cell(40, 10, out_txt, border=1)
+                        pdf.cell(w[0], 10, s['in_glyphs'], border=1)
+                        pdf.cell(w[1], 10, s['in_chars'], border=1)
+                        pdf.cell(w[2], 10, s['out_chars'], border=1)
+                        pdf.cell(w[3], 10, s['out_glyphs'], border=1)
                         pdf.ln()
                     except Exception as e:
                         pass
