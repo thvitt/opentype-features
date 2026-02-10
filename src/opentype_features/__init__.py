@@ -36,9 +36,23 @@ def main() -> None:
     cmap = font.getBestCmap()
     reverse_cmap = {v: k for k, v in cmap.items()}
 
+    # Removed: from fpdf.shaping import ShapingParameters
+
     def get_glyph_info(glyph_name):
         char = chr(reverse_cmap[glyph_name]) if glyph_name in reverse_cmap else None
         return char, glyph_name
+
+    def get_descriptive_name(glyph_name, substitution_info=None):
+        # If it's a generic name, try to make it better
+        if glyph_name.startswith('glyph') and glyph_name[5:].isdigit():
+            if substitution_info:
+                if substitution_info['type'] == 'ligature':
+                    return "_".join(substitution_info['components']) + "." + substitution_info['tag']
+                elif substitution_info['type'] == 'single':
+                    return substitution_info['input'] + "." + substitution_info['tag']
+                elif substitution_info['type'] == 'alternate':
+                    return substitution_info['input'] + ".alt." + substitution_info['tag']
+        return glyph_name
 
     print(f"Analyzing font: {font_path}")
     print("-" * 40)
@@ -57,10 +71,6 @@ def main() -> None:
             print(f"Warning: Could not embed font for PDF: {e}")
             pdf = None
 
-    def format_glyph_info(glyph_name):
-        char, name = get_glyph_info(glyph_name)
-        return char if char else f"<{name}>"
-
     def process_subtable(lookup_type, subtable, tag):
         substitutions = []
         if lookup_type == 1: # Single
@@ -69,11 +79,13 @@ def main() -> None:
                     in_char, in_name = get_glyph_info(input_glyph)
                     out_char, out_name = get_glyph_info(output_glyph)
                     if in_char:
+                        # Generate descriptive name for output if generic
+                        display_out_name = get_descriptive_name(out_name, {'type': 'single', 'input': in_name, 'tag': tag})
                         substitutions.append({
                             'in_chars': in_char,
                             'in_glyphs': in_name,
-                            'out_chars': out_char if out_char else in_char, # Use input char for rendering if output has no unicode
-                            'out_glyphs': out_name,
+                            'out_chars': out_char if out_char else in_char, 
+                            'out_glyphs': display_out_name,
                             'tag': tag
                         })
         
@@ -102,15 +114,17 @@ def main() -> None:
                         comp_info = [get_glyph_info(c) for c in components]
                         
                         comp_chars = "".join(c for c, n in comp_info if c)
-                        comp_names = " ".join(n for c, n in comp_info)
+                        comp_names = [n for c, n in comp_info]
                         out_char, out_name = get_glyph_info(output)
                         
                         if comp_chars:
+                            # Generate descriptive name for output if generic
+                            display_out_name = get_descriptive_name(out_name, {'type': 'ligature', 'components': comp_names, 'tag': tag})
                             substitutions.append({
                                 'in_chars': comp_chars,
-                                'in_glyphs': comp_names,
+                                'in_glyphs': " ".join(comp_names),
                                 'out_chars': out_char if out_char else comp_chars,
-                                'out_glyphs': out_name,
+                                'out_glyphs': display_out_name,
                                 'tag': tag
                             })
 
@@ -120,11 +134,12 @@ def main() -> None:
                     in_char, in_name = get_glyph_info(input_glyph)
                     if in_char:
                         out_char, out_name = get_glyph_info(alternates[0])
+                        display_out_name = get_descriptive_name(out_name, {'type': 'alternate', 'input': in_name, 'tag': tag})
                         substitutions.append({
                             'in_chars': in_char,
                             'in_glyphs': in_name,
                             'out_chars': out_char if out_char else in_char,
-                            'out_glyphs': out_name,
+                            'out_glyphs': display_out_name,
                             'tag': tag
                         })
         return substitutions
@@ -188,11 +203,23 @@ def main() -> None:
                 for s in all_substitutions:
                     try:
                         pdf.cell(w[0], 10, s['in_glyphs'], border=1)
+                        
+                        # OFF Render: Disable shaping or at least ensure no special features
+                        pdf.set_text_shaping(use_shaping_engine=False)
                         pdf.cell(w[1], 10, s['in_chars'], border=1)
-                        pdf.cell(w[2], 10, s['out_chars'], border=1)
+                        
+                        # ON Render: Enable shaping with ONLY this feature
+                        # We also enable 'liga' and 'calt' usually, but here we want to 
+                        # demonstrate THIS specific feature.
+                        pdf.set_text_shaping(use_shaping_engine=True, features={s['tag']: True})
+                        pdf.cell(w[2], 10, s['in_chars'], border=1)
+                        
+                        # Reset for target glyph column
+                        pdf.set_text_shaping(use_shaping_engine=False)
                         pdf.cell(w[3], 10, s['out_glyphs'], border=1)
                         pdf.ln()
                     except Exception as e:
+                        print(f"Error rendering row: {e}")
                         pass
                 pdf.ln(5)
             else:
