@@ -19,3 +19,60 @@ opentype-features = "opentype_features:main"
 [build-system]
 requires = ["uv_build>=0.10.0,<0.11.0"]
 build-backend = "uv_build"
+
+[tool.ruff.lint]
+select = [
+  'A',     # flake8-builtins: Shadowing of built-in names
+  # 'FAST', # FastAPI
+  'ANN',   # flake8-annotations: Make sure functions are type-annotated
+  'ASYNC', # flake8-async
+  'S',     # flake8-bandit: Security relevant lints
+  'B',     # flake8-bugbear
+  'C4',    # flake8-comprehensions
+  'EXE',   # shebang checks
+  'FA',    # from __future__ import annotations
+  'ISC',   # implicit str concat
+  'ICN',   # import conventions
+  'LOG',   # logging
+  'PIE',   # misc. lints. TODO: do we want this?
+  'PYI',   # special rules for .pyi files
+  'PT',    # pytest style
+  'Q',     # quotes. TODO: do we want this or does formatting handle this?
+  'SIM',   # simplify rules
+  'SLOT',  # rules for __slots__
+  'TC',    # what imports are only needed for type checking
+  'PTH',   # use pathlib!
+  'I',     # isort
+  'NPY',   # numpy-specific rules
+  'PD',    # pandas-specific rules
+  'N',     # PEP8 naming
+  'E', 'W',# pycodestyle
+  'D',     # pydocstyle
+  'F',     # pyflakes
+  'PL',    # pylint
+  'UP',    # pyupgrade
+  'FURB',  # refurb
+  'RUF',    # Ruff-specific rules
+  'TRY',    # tryceratops: try-except antipatterns
+]
+ignore = [
+  'RUF001', 'RUF002', 'RUF003',    # 'ambiguous characters'
+  'ANN003', # missing-type-kwargs. Maybe re-enable
+  'S101',   # assert – I know when and how to use it
+  'E501',
+  'PLR0913', # too many arguments
+  'D100',   # no docstring required for modules
+  'D105',   # no docstring required for magic methods
+  'D203',   # no blank line before class required
+  'D212',   # I want multi-line docstrings to start on the second line
+]
+future-annotations = true
+
+[tool.ruff.lint.per-file-ignores]
+'!src/**.py' = ['D']
+'tests/**/*.py' = ['ANN']
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.0",
+]
