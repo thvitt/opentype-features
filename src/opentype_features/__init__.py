@@ -3,6 +3,7 @@
 import argparse
 import sys
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -21,270 +22,339 @@ LOOKUP_TYPE_EXTENSION = 7
 # Private Use Area for rendering unmapped glyphs
 PUA_START = 0xE000
 
-
-def get_tag_name(tag: str) -> str:
-    """Return the friendly name for an OpenType feature tag."""
-    return FEATURE_NAMES.get(tag, tag)
-
-
-def get_glyph_info(
-    glyph_name: str, reverse_cmap: dict[str, int], pua_map: dict[str, str]
-) -> tuple[str, str]:
-    """Return the character and glyph name for a given glyph name."""
-    if glyph_name in reverse_cmap:
-        return chr(reverse_cmap[glyph_name]), glyph_name
-
-    # If not in cmap, use a PUA character for rendering
-    if glyph_name not in pua_map:
-        pua_char = chr(PUA_START + len(pua_map))
-        pua_map[glyph_name] = pua_char
-
-    return pua_map[glyph_name], glyph_name
+# PDF Layout Constants
+PAGE_BREAK_THRESHOLD = 250
+MIN_SUBS_FOR_MULTI_COLUMN = 5
+GUTTER_WIDTH = 10
+ROW_HEIGHT = 8
+PAGE_BOTTOM_MARGIN = 275
+COLUMN_NAME_WIDTH = 32
+COLUMN_RENDER_WIDTH = 13
+COLUMN_UNIT_WIDTH = COLUMN_NAME_WIDTH + COLUMN_RENDER_WIDTH
+TOTAL_UNIT_WIDTH = COLUMN_UNIT_WIDTH * 2
 
 
-def get_display_name(glyph_name: str, reverse_cmap: dict[str, int]) -> str:
-    """Generate a display name for a glyph following user rules."""
-    # If fontTools generated a generic name (e.g., glyph00499)
-    if glyph_name.startswith("glyph") and glyph_name[5:].isdigit():
-        if glyph_name in reverse_cmap:
-            codepoint = reverse_cmap[glyph_name]
-            return f"U+{codepoint:04X}"
-        # No name, no unicode -> glyph number (normalized)
-        return f"glyph{int(glyph_name[5:])}"
-    # It has a specific name
-    return glyph_name
+@dataclass(frozen=True)
+class Substitution:
+    """Represents a single OpenType substitution."""
+
+    input_glyphs: str
+    input_chars: str
+    output_glyphs: str
+    output_chars: str
+    feature_tag: str
 
 
-def _process_single_subtable(
-    subtable: Any,  # noqa: ANN401
-    tag: str,
-    reverse_cmap: dict[str, int],
-    pua_map: dict[str, str],
-) -> list[dict[str, Any]]:
-    """Process a single substitution subtable."""
-    substitutions = []
-    if hasattr(subtable, "mapping"):
-        for input_glyph, output_glyph in subtable.mapping.items():
-            in_char, in_name = get_glyph_info(input_glyph, reverse_cmap, pua_map)
-            out_char, out_name = get_glyph_info(output_glyph, reverse_cmap, pua_map)
+class FontAnalyzer:
+    """Analyzes a font for OpenType features and generates reports."""
 
-            substitutions.append(
-                {
-                    "in_chars": in_char,
-                    "in_glyphs": get_display_name(in_name, reverse_cmap),
-                    "out_chars": out_char,
-                    "out_glyphs": get_display_name(out_name, reverse_cmap),
-                    "tag": tag,
-                }
-            )
-    return substitutions
+    def __init__(self, font_path: Path) -> None:
+        """
+        Initialize the FontAnalyzer.
 
+        Args:
+            font_path: The path to the font file to analyze.
 
-def _process_multiple_subtable(
-    subtable: Any,  # noqa: ANN401
-    tag: str,
-    reverse_cmap: dict[str, int],
-    pua_map: dict[str, str],
-) -> list[dict[str, Any]]:
-    """Process a multiple substitution subtable."""
-    substitutions = []
-    if hasattr(subtable, "mapping"):
-        for input_glyph, output_glyphs in subtable.mapping.items():
-            in_char, in_name = get_glyph_info(input_glyph, reverse_cmap, pua_map)
-            out_info = [
-                get_glyph_info(g, reverse_cmap, pua_map) for g in output_glyphs
-            ]
-            out_chars = "".join(c for c, n in out_info)
-            out_names = " ".join(get_display_name(n, reverse_cmap) for c, n in out_info)
-            substitutions.append(
-                {
-                    "in_chars": in_char,
-                    "in_glyphs": get_display_name(in_name, reverse_cmap),
-                    "out_chars": out_chars,
-                    "out_glyphs": out_names,
-                    "tag": tag,
-                }
-            )
-    return substitutions
+        """
+        self.font_path = font_path
+        self.font = TTFont(str(font_path))
+        self.reverse_cmap = self._build_reverse_cmap()
+        self.pua_map: dict[str, str] = {}
+        self.feature_substitutions: dict[str, list[Substitution]] = {}
 
+    def _build_reverse_cmap(self) -> dict[str, int]:
+        cmap = self.font.getBestCmap()
+        return {v: k for k, v in cmap.items()}
 
-def _process_ligature_subtable(
-    subtable: Any,  # noqa: ANN401
-    tag: str,
-    reverse_cmap: dict[str, int],
-    pua_map: dict[str, str],
-) -> list[dict[str, Any]]:
-    """Process a ligature substitution subtable."""
-    substitutions = []
-    if hasattr(subtable, "ligatures"):
-        for first_glyph, ligatures in subtable.ligatures.items():
-            for lig in ligatures:
-                components = [first_glyph, *lig.Component]
-                output = lig.LigGlyph
-                comp_info = [
-                    get_glyph_info(c, reverse_cmap, pua_map) for c in components
-                ]
+    def get_tag_name(self, tag: str) -> str:
+        """Return the friendly name for an OpenType feature tag."""
+        return FEATURE_NAMES.get(tag, tag)
 
-                comp_chars = "".join(c for c, n in comp_info)
-                comp_names = [get_display_name(n, reverse_cmap) for c, n in comp_info]
-                out_char, out_name = get_glyph_info(output, reverse_cmap, pua_map)
+    def get_glyph_info(self, glyph_name: str) -> tuple[str, str]:
+        """Return the character and glyph name for a given glyph name."""
+        if glyph_name in self.reverse_cmap:
+            return chr(self.reverse_cmap[glyph_name]), glyph_name
 
+        if glyph_name not in self.pua_map:
+            pua_char = chr(PUA_START + len(self.pua_map))
+            self.pua_map[glyph_name] = pua_char
+
+        return self.pua_map[glyph_name], glyph_name
+
+    def get_display_name(self, glyph_name: str) -> str:
+        """Generate a display name for a glyph following user rules."""
+        if glyph_name.startswith("glyph") and glyph_name[5:].isdigit():
+            if glyph_name in self.reverse_cmap:
+                codepoint = self.reverse_cmap[glyph_name]
+                return f"U+{codepoint:04X}"
+            return f"glyph{int(glyph_name[5:])}"
+        return glyph_name
+
+    def analyze(self) -> None:
+        """Analyze the font's GSUB table."""
+        if "GSUB" not in self.font:
+            return
+
+        gsub = self.font["GSUB"].table
+        feature_list = gsub.FeatureList.FeatureRecord
+        lookup_list = gsub.LookupList.Lookup
+
+        for feature_record in feature_list:
+            tag = feature_record.FeatureTag
+            if tag not in self.feature_substitutions:
+                self.feature_substitutions[tag] = []
+
+            for lookup_index in feature_record.Feature.LookupListIndex:
+                if lookup_index < len(lookup_list):
+                    lookup = lookup_list[lookup_index]
+                    self.feature_substitutions[tag].extend(
+                        self._process_lookup(lookup, tag)
+                    )
+
+        # Deduplicate and filter empty features
+        cleaned_subs = {}
+        for tag, subs in self.feature_substitutions.items():
+            unique_subs = []
+            seen = set()
+            for sub in subs:
+                if sub not in seen:
+                    unique_subs.append(sub)
+                    seen.add(sub)
+            if unique_subs:
+                cleaned_subs[tag] = unique_subs
+        self.feature_substitutions = cleaned_subs
+
+    def _process_lookup(self, lookup: Any, tag: str) -> list[Substitution]:  # noqa: ANN401
+        substitutions = []
+        if lookup.LookupType == LOOKUP_TYPE_EXTENSION:
+            for subtable in lookup.SubTable:
+                substitutions.extend(
+                    self._process_subtable(
+                        subtable.ExtensionLookupType, subtable.ExtSubTable, tag
+                    )
+                )
+        else:
+            for subtable in lookup.SubTable:
+                substitutions.extend(
+                    self._process_subtable(lookup.LookupType, subtable, tag)
+                )
+        return substitutions
+
+    def _process_subtable(
+        self,
+        lookup_type: int,
+        subtable: Any,  # noqa: ANN401
+        tag: str,
+    ) -> list[Substitution]:
+        if lookup_type == LOOKUP_TYPE_SINGLE:
+            return self._process_single_subtable(subtable, tag)
+        if lookup_type == LOOKUP_TYPE_MULTIPLE:
+            return self._process_multiple_subtable(subtable, tag)
+        if lookup_type == LOOKUP_TYPE_LIGATURE:
+            return self._process_ligature_subtable(subtable, tag)
+        if lookup_type == LOOKUP_TYPE_ALTERNATE:
+            return self._process_alternate_subtable(subtable, tag)
+        return []
+
+    def _process_single_subtable(
+        self,
+        subtable: Any,  # noqa: ANN401
+        tag: str,
+    ) -> list[Substitution]:
+        substitutions = []
+        if hasattr(subtable, "mapping"):
+            for input_glyph, output_glyph in subtable.mapping.items():
+                in_char, in_name = self.get_glyph_info(input_glyph)
+                out_char, out_name = self.get_glyph_info(output_glyph)
                 substitutions.append(
-                    {
-                        "in_chars": comp_chars,
-                        "in_glyphs": " ".join(comp_names),
-                        "out_chars": out_char,
-                        "out_glyphs": get_display_name(out_name, reverse_cmap),
-                        "tag": tag,
-                    }
+                    Substitution(
+                        input_glyphs=self.get_display_name(in_name),
+                        input_chars=in_char,
+                        output_glyphs=self.get_display_name(out_name),
+                        output_chars=out_char,
+                        feature_tag=tag,
+                    )
                 )
-    return substitutions
+        return substitutions
 
-
-def _process_alternate_subtable(
-    subtable: Any,  # noqa: ANN401
-    tag: str,
-    reverse_cmap: dict[str, int],
-    pua_map: dict[str, str],
-) -> list[dict[str, Any]]:
-    """Process an alternate substitution subtable."""
-    substitutions = []
-    if hasattr(subtable, "alternates"):
-        for input_glyph, alternates in subtable.alternates.items():
-            in_char, in_name = get_glyph_info(input_glyph, reverse_cmap, pua_map)
-            out_char, out_name = get_glyph_info(alternates[0], reverse_cmap, pua_map)
-            substitutions.append(
-                {
-                    "in_chars": in_char,
-                    "in_glyphs": get_display_name(in_name, reverse_cmap),
-                    "out_chars": out_char,
-                    "out_glyphs": get_display_name(out_name, reverse_cmap),
-                    "tag": tag,
-                }
-            )
-    return substitutions
-
-
-def process_subtable(
-    lookup_type: int,
-    subtable: Any,  # noqa: ANN401
-    tag: str,
-    reverse_cmap: dict[str, int],
-    pua_map: dict[str, str],
-) -> list[dict[str, Any]]:
-    """Extract substitutions from a GSUB subtable."""
-    if lookup_type == LOOKUP_TYPE_SINGLE:
-        return _process_single_subtable(subtable, tag, reverse_cmap, pua_map)
-    if lookup_type == LOOKUP_TYPE_MULTIPLE:
-        return _process_multiple_subtable(subtable, tag, reverse_cmap, pua_map)
-    if lookup_type == LOOKUP_TYPE_LIGATURE:
-        return _process_ligature_subtable(subtable, tag, reverse_cmap, pua_map)
-    if lookup_type == LOOKUP_TYPE_ALTERNATE:
-        return _process_alternate_subtable(subtable, tag, reverse_cmap, pua_map)
-    return []
-
-
-def process_lookup(
-    lookup: Any,  # noqa: ANN401
-    tag: str,
-    reverse_cmap: dict[str, int],
-    pua_map: dict[str, str],
-) -> list[dict[str, Any]]:
-    """Extract substitutions from a GSUB lookup."""
-    substitutions = []
-    if lookup.LookupType == LOOKUP_TYPE_EXTENSION:
-        for subtable in lookup.SubTable:
-            ext_lookup_type = subtable.ExtensionLookupType
-            actual_subtable = subtable.ExtSubTable
-            substitutions.extend(
-                process_subtable(
-                    ext_lookup_type, actual_subtable, tag, reverse_cmap, pua_map
+    def _process_multiple_subtable(
+        self,
+        subtable: Any,  # noqa: ANN401
+        tag: str,
+    ) -> list[Substitution]:
+        substitutions = []
+        if hasattr(subtable, "mapping"):
+            for input_glyph, output_glyphs in subtable.mapping.items():
+                in_char, in_name = self.get_glyph_info(input_glyph)
+                out_info = [self.get_glyph_info(g) for g in output_glyphs]
+                out_chars = "".join(c for c, n in out_info)
+                out_names = " ".join(self.get_display_name(n) for c, n in out_info)
+                substitutions.append(
+                    Substitution(
+                        input_glyphs=self.get_display_name(in_name),
+                        input_chars=in_char,
+                        output_glyphs=out_names,
+                        output_chars=out_chars,
+                        feature_tag=tag,
+                    )
                 )
-            )
-    else:
-        for subtable in lookup.SubTable:
-            substitutions.extend(
-                process_subtable(lookup.LookupType, subtable, tag, reverse_cmap, pua_map)
-            )
-    return substitutions
+        return substitutions
+
+    def _process_ligature_subtable(
+        self,
+        subtable: Any,  # noqa: ANN401
+        tag: str,
+    ) -> list[Substitution]:
+        substitutions = []
+        if hasattr(subtable, "ligatures"):
+            for first_glyph, ligatures in subtable.ligatures.items():
+                for lig in ligatures:
+                    components = [first_glyph, *lig.Component]
+                    output = lig.LigGlyph
+                    comp_info = [self.get_glyph_info(c) for c in components]
+                    comp_chars = "".join(c for c, n in comp_info)
+                    comp_names = [self.get_display_name(n) for c, n in comp_info]
+                    out_char, out_name = self.get_glyph_info(output)
+                    substitutions.append(
+                        Substitution(
+                            input_glyphs=" ".join(comp_names),
+                            input_chars=comp_chars,
+                            output_glyphs=self.get_display_name(out_name),
+                            output_chars=out_char,
+                            feature_tag=tag,
+                        )
+                    )
+        return substitutions
+
+    def _process_alternate_subtable(
+        self,
+        subtable: Any,  # noqa: ANN401
+        tag: str,
+    ) -> list[Substitution]:
+        substitutions = []
+        if hasattr(subtable, "alternates"):
+            for input_glyph, alternates in subtable.alternates.items():
+                in_char, in_name = self.get_glyph_info(input_glyph)
+                # Just take the first alternate for simplicity in this report
+                out_char, out_name = self.get_glyph_info(alternates[0])
+                substitutions.append(
+                    Substitution(
+                        input_glyphs=self.get_display_name(in_name),
+                        input_chars=in_char,
+                        output_glyphs=self.get_display_name(out_name),
+                        output_chars=out_char,
+                        feature_tag=tag,
+                    )
+                )
+        return substitutions
+
+    def create_modified_font(self) -> Path:
+        """Create a temporary font file with unmapped glyphs added to the cmap."""
+        if not self.pua_map:
+            return self.font_path
+
+        font_copy = TTFont(str(self.font_path))
+        for table in font_copy["cmap"].tables:
+            if table.isUnicode():
+                for name, char in self.pua_map.items():
+                    table.cmap[ord(char)] = name
+
+        with tempfile.NamedTemporaryFile(suffix=".ttf", delete=False) as tmp:
+            temp_path = Path(tmp.name)
+        font_copy.save(str(temp_path))
+        return temp_path
 
 
-def create_modified_font(font_path: Path, pua_map: dict[str, str]) -> Path:
-    """Create a temporary font file with unmapped glyphs added to the cmap."""
-    font = TTFont(str(font_path))
-    # Add mappings to all Unicode cmaps found
-    for table in font["cmap"].tables:
-        if table.isUnicode():
-            for name, char in pua_map.items():
-                table.cmap[ord(char)] = name
+def _draw_unit_header(pdf: FPDF, x: float, y: float) -> None:
+    """Draw the header for a single substitution unit."""
+    pdf.set_xy(x, y)
+    pdf.set_font("Helvetica", "B", 7)
+    pdf.set_text_color(120)
+    # combined column header ('off' / 'on') for one unit
+    pdf.cell(COLUMN_UNIT_WIDTH, 6, "off", align="C")
+    pdf.cell(COLUMN_UNIT_WIDTH, 6, "on", align="C")
+    pdf.set_draw_color(220)
+    pdf.line(x, y + 6, x + TOTAL_UNIT_WIDTH, y + 6)
 
-    # Save to a temporary file
-    with tempfile.NamedTemporaryFile(suffix=".ttf", delete=False) as tmp:
-        temp_path = Path(tmp.name)
-    font.save(str(temp_path))
-    return temp_path
+
+def _draw_all_headers(pdf: FPDF, y: float, multi: bool) -> float:
+    """Draw headers for one or two columns of substitutions."""
+    _draw_unit_header(pdf, 10, y)
+    if multi:
+        _draw_unit_header(pdf, 10 + TOTAL_UNIT_WIDTH + GUTTER_WIDTH, y)
+    return y + ROW_HEIGHT
+
+
+def _render_substitution_unit(pdf: FPDF, x: float, y: float, sub: Substitution) -> None:
+    """Render a single substitution unit (input, off, on, output)."""
+    pdf.set_xy(x, y)
+    pdf.set_text_color(0)
+
+    pdf.set_font("Helvetica", "", 7)
+    pdf.cell(COLUMN_NAME_WIDTH, ROW_HEIGHT, sub.input_glyphs, align="L")
+
+    pdf.set_font("TargetFont", "", 10)
+    pdf.set_text_shaping(use_shaping_engine=False)
+    pdf.cell(COLUMN_RENDER_WIDTH, ROW_HEIGHT, sub.input_chars, align="C")
+
+    pdf.set_text_shaping(use_shaping_engine=True, features={sub.feature_tag: True})
+    pdf.cell(COLUMN_RENDER_WIDTH, ROW_HEIGHT, sub.input_chars, align="C")
+
+    pdf.set_text_shaping(use_shaping_engine=False)
+    pdf.set_font("Helvetica", "", 7)
+    pdf.cell(COLUMN_NAME_WIDTH, ROW_HEIGHT, sub.output_glyphs, align="R")
 
 
 def render_pdf_report(
-    font_path: Path,
-    feature_substitutions: dict[str, list[dict[str, Any]]],
+    analyzer: FontAnalyzer,
     output_path: Path,
     actual_font_path: Path,
 ) -> None:
     """Generate a PDF report of OpenType features."""
     pdf = FPDF()
+    pdf.set_auto_page_break(False)
     pdf.add_page()
     try:
         pdf.add_font("TargetFont", style="", fname=str(actual_font_path))
-        pdf.set_font("TargetFont", "", 16)
-        pdf.cell(0, 10, f"OpenType Feature Report: {font_path.name}", ln=True)
+        pdf.set_font("Helvetica", "B", 16)
+        pdf.cell(0, 10, f"OpenType Feature Report: {analyzer.font_path.name}", ln=True)
         pdf.ln(5)
     except Exception as e:
         print(f"Warning: Could not embed font for PDF: {e}")
         return
 
-    for tag in sorted(feature_substitutions.keys()):
-        all_substitutions = feature_substitutions[tag]
-        friendly_name = get_tag_name(tag)
+    for tag in sorted(analyzer.feature_substitutions.keys()):
+        subs = analyzer.feature_substitutions[tag]
+        friendly_name = analyzer.get_tag_name(tag)
 
-        # Deduplicate substitutions
-        unique_subs = []
-        seen = set()
-        for s in all_substitutions:
-            s_tuple = (s["in_glyphs"], s["out_glyphs"], s["tag"])
-            if s_tuple not in seen:
-                unique_subs.append(s)
-                seen.add(s_tuple)
-        all_substitutions = unique_subs
+        if pdf.get_y() > PAGE_BREAK_THRESHOLD:
+            pdf.add_page()
 
-        pdf.set_font("TargetFont", "", 12)
+        pdf.start_section(f"{tag}: {friendly_name}", level=0)
+        pdf.set_font("Helvetica", "B", 12)
+        pdf.set_text_color(0)
         pdf.cell(0, 10, f"Feature: {tag} ({friendly_name})", ln=True)
-        pdf.set_font("TargetFont", "", 10)
 
-        if all_substitutions:
-            w = [45, 35, 35, 45]
-            pdf.cell(w[0], 8, "Source Glyphs", border=1)
-            pdf.cell(w[1], 8, "OFF (Render)", border=1)
-            pdf.cell(w[2], 8, "ON (Render)", border=1)
-            pdf.cell(w[3], 8, "Target Glyph(s)", border=1)
-            pdf.ln()
+        multi = len(subs) > MIN_SUBS_FOR_MULTI_COLUMN
+        y = pdf.get_y()
+        y = _draw_all_headers(pdf, y, multi)
 
-            for s in all_substitutions:
-                try:
-                    pdf.cell(w[0], 10, s["in_glyphs"], border=1)
-                    pdf.set_text_shaping(use_shaping_engine=False)
-                    pdf.cell(w[1], 10, s["in_chars"], border=1)
-                    pdf.set_text_shaping(use_shaping_engine=True, features={s["tag"]: True})
-                    pdf.cell(w[2], 10, s["in_chars"], border=1)
-                    pdf.set_text_shaping(use_shaping_engine=False)
-                    pdf.cell(w[3], 10, s["out_glyphs"], border=1)
-                    pdf.ln()
-                except Exception as e:
-                    print(f"Error rendering row: {e}")
-            pdf.ln(5)
-        else:
-            pdf.cell(0, 10, "No simple substitutions found for this feature.", ln=True)
-            pdf.ln()
+        for i in range(0, len(subs), 2):
+            if y + ROW_HEIGHT > PAGE_BOTTOM_MARGIN:
+                pdf.add_page()
+                y = 15
+                y = _draw_all_headers(pdf, y, multi)
+
+            _render_substitution_unit(pdf, 10, y, subs[i])
+
+            if i + 1 < len(subs):
+                _render_substitution_unit(
+                    pdf, 10 + TOTAL_UNIT_WIDTH + GUTTER_WIDTH, y, subs[i + 1]
+                )
+
+            y += ROW_HEIGHT
+
+        pdf.set_y(y + 5)
 
     try:
         pdf.output(str(output_path))
@@ -293,32 +363,24 @@ def render_pdf_report(
         print(f"Error saving PDF: {e}")
 
 
-def print_console_report(feature_substitutions: dict[str, list[dict[str, Any]]]) -> None:
+def print_console_report(analyzer: FontAnalyzer) -> None:
     """Print a summary of OpenType features to the console."""
-    for tag in sorted(feature_substitutions.keys()):
-        all_substitutions = feature_substitutions[tag]
-        friendly_name = get_tag_name(tag)
-
-        unique_subs = []
-        seen = set()
-        for s in all_substitutions:
-            s_tuple = (s["in_glyphs"], s["out_glyphs"], s["tag"])
-            if s_tuple not in seen:
-                unique_subs.append(s)
-                seen.add(s_tuple)
-
-        if unique_subs:
-            print(f"\nFeature: {tag} ({friendly_name})")
-            for s in unique_subs:
-                print(
-                    f"  {s['in_glyphs']} ({s['in_chars']}) -> "
-                    f"{s['out_glyphs']} ({s['out_chars']})"
-                )
+    for tag in sorted(analyzer.feature_substitutions.keys()):
+        subs = analyzer.feature_substitutions[tag]
+        friendly_name = analyzer.get_tag_name(tag)
+        print(f"\nFeature: {tag} ({friendly_name})")
+        for sub in subs:
+            print(
+                f"  {sub.input_glyphs} ({sub.input_chars}) -> "
+                f"{sub.output_glyphs} ({sub.output_chars})"
+            )
 
 
 def main() -> None:
     """Execute the OpenType feature analysis tool."""
-    parser = argparse.ArgumentParser(description="Analyze OpenType features in a font file.")
+    parser = argparse.ArgumentParser(
+        description="Analyze OpenType features in a font file."
+    )
     parser.add_argument("font_path", help="Path to the .ttf or .otf font file")
     parser.add_argument("--output", "-o", help="Path to save the PDF report (optional)")
     args = parser.parse_args()
@@ -328,51 +390,21 @@ def main() -> None:
         print(f"Error: File not found: {font_path}")
         sys.exit(1)
 
-    try:
-        font = TTFont(str(font_path))
-    except Exception as e:
-        print(f"Error loading font: {e}")
-        sys.exit(1)
+    analyzer = FontAnalyzer(font_path)
+    analyzer.analyze()
 
-    if "GSUB" not in font:
-        print("No GSUB table found. This font might not have OpenType features.")
+    if not analyzer.feature_substitutions:
+        print("No OpenType features with substitutions found.")
         return
-
-    gsub = font["GSUB"].table
-    feature_list = gsub.FeatureList.FeatureRecord
-    lookup_list = gsub.LookupList.Lookup
-
-    cmap = font.getBestCmap()
-    reverse_cmap = {v: k for k, v in cmap.items()}
-    pua_map: dict[str, str] = {}
 
     print(f"Analyzing font: {font_path}")
     print("-" * 40)
-
-    feature_substitutions: dict[str, list[dict[str, Any]]] = {}
-    for feature_record in feature_list:
-        tag = feature_record.FeatureTag
-        if tag not in feature_substitutions:
-            feature_substitutions[tag] = []
-
-        for lookup_index in feature_record.Feature.LookupListIndex:
-            if lookup_index < len(lookup_list):
-                lookup = lookup_list[lookup_index]
-                feature_substitutions[tag].extend(
-                    process_lookup(lookup, tag, reverse_cmap, pua_map)
-                )
-
-    print_console_report(feature_substitutions)
+    print_console_report(analyzer)
 
     if args.output:
-        actual_font_path = font_path
-        if pua_map:
-            actual_font_path = create_modified_font(font_path, pua_map)
-
+        actual_font_path = analyzer.create_modified_font()
         try:
-            render_pdf_report(
-                font_path, feature_substitutions, Path(args.output), actual_font_path
-            )
+            render_pdf_report(analyzer, Path(args.output), actual_font_path)
         finally:
             if actual_font_path != font_path and actual_font_path.exists():
                 actual_font_path.unlink()
