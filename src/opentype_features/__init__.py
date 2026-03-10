@@ -99,11 +99,13 @@ class VisualComparator:
         total_pixels = arr_off.size
         diff_total = float((only_off + only_on) / total_pixels)
 
-        # Avoid division by zero
-        if common > 0:
-            diff_ratio = float((only_off + only_on) / common)
+        # New ratio: (added + removed) / (all non-white pixels)
+        # all non-white = only_off + only_on + common
+        total_foreground = only_off + only_on + common
+        if total_foreground > 0:
+            diff_ratio = float((only_off + only_on) / total_foreground)
         else:
-            diff_ratio = 1.0 if (only_off + only_on) > 0 else 0.0
+            diff_ratio = 0.0
 
         return diff_total, diff_ratio
 
