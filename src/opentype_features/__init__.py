@@ -591,6 +591,7 @@ def _render_compact_table(
     y: float,
     analyzer: FontAnalyzer,
     comparator: VisualComparator,
+    show_diff: bool = True,
 ) -> float:
     """Render mappings in a compact horizontal table."""
     max_width = 190
@@ -602,9 +603,8 @@ def _render_compact_table(
         if not chunk:
             break
 
-        # We now have 3 rows: off, on, diff
         # Check if we need a page break
-        rows_to_render = 3
+        rows_to_render = 3 if show_diff else 2
         total_chunk_height = rows_to_render * ROW_HEIGHT + 5
 
         # Extra height for labels if needed
@@ -626,22 +626,35 @@ def _render_compact_table(
             analyzer,
             comparator,
             mode="off",
-        )
-        y = _render_chunk_row(
-            pdf, chunk, "on", True, tag, y, label_width, analyzer, comparator, mode="on"
+            show_diff=show_diff,
         )
         y = _render_chunk_row(
             pdf,
             chunk,
-            "diff",
+            "on",
             True,
             tag,
             y,
             label_width,
             analyzer,
             comparator,
-            mode="diff",
+            mode="on",
+            show_diff=show_diff,
         )
+        if show_diff:
+            y = _render_chunk_row(
+                pdf,
+                chunk,
+                "diff",
+                True,
+                tag,
+                y,
+                label_width,
+                analyzer,
+                comparator,
+                mode="diff",
+                show_diff=show_diff,
+            )
         y += 4  # Padding between chunks
 
     return y
@@ -680,6 +693,7 @@ def _render_chunk_row(
     analyzer: FontAnalyzer,
     comparator: VisualComparator,
     mode: str = "off",
+    show_diff: bool = True,
 ) -> float:
     """Render a single row (off, on, or diff) for a chunk of substitutions."""
     pdf.set_xy(10, y)
@@ -718,7 +732,7 @@ def _render_chunk_row(
             # Advance X position
             pdf.set_xy(x_pos + width, y)
         elif mode == "on":
-            if sub.diff_total < DIFF_THRESHOLD_SMALL:
+            if show_diff and sub.diff_total < DIFF_THRESHOLD_SMALL:
                 # Subtle difference overlay: off (light gray) + on (red)
                 pdf.set_text_color(220)
                 pdf.set_text_shaping(use_shaping_engine=False)
@@ -735,15 +749,16 @@ def _render_chunk_row(
                 pdf.cell(width, ROW_HEIGHT, sub.input_chars, align="C")
 
             # Score label
-            current_y = pdf.get_y()
-            pdf.set_xy(x_pos, current_y + ROW_HEIGHT - 2)
-            pdf.set_font("Helvetica", "I", 3)
-            pdf.set_text_color(180)
-            score_text = f"t:{sub.diff_total:.1%} r:{sub.diff_ratio:.1%}"
-            pdf.cell(width, 2, score_text, align="C")
-            pdf.set_xy(x_pos + width, current_y)
-            pdf.set_font("TargetFont", "", 10)
-            pdf.set_text_color(0)
+            if show_diff:
+                current_y = pdf.get_y()
+                pdf.set_xy(x_pos, current_y + ROW_HEIGHT - 2)
+                pdf.set_font("Helvetica", "I", 3)
+                pdf.set_text_color(180)
+                score_text = f"t:{sub.diff_total:.1%} r:{sub.diff_ratio:.1%}"
+                pdf.cell(width, 2, score_text, align="C")
+                pdf.set_xy(x_pos + width, current_y)
+                pdf.set_font("TargetFont", "", 10)
+                pdf.set_text_color(0)
 
         else:
             # Mode 'off': Normal rendering
@@ -882,6 +897,8 @@ def render_pdf_report(
     analyzer: FontAnalyzer,
     output_path: Path,
     actual_font_path: Path,
+    show_diff: bool = True,
+    min_ratio: float = 0.0,
 ) -> None:
     """Generate a PDF report of OpenType features."""
     pdf = FPDF()
@@ -917,7 +934,8 @@ def render_pdf_report(
             diff_total, diff_ratio = comparator.get_difference_score(
                 s.input_chars, tag, s.languages
             )
-            if diff_total > DIFF_THRESHOLD_NONE:
+            # Filter by total diff (technical change) and user-specified ratio
+            if diff_total > DIFF_THRESHOLD_NONE and diff_ratio >= min_ratio:
                 scored_subs.append(
                     Substitution(
                         input_glyphs=s.input_glyphs,
@@ -946,7 +964,9 @@ def render_pdf_report(
         pdf.cell(0, 10, f"Feature: {tag} ({friendly_name})", ln=True)
 
         y = pdf.get_y()
-        y = _render_compact_table(pdf, subs, tag, y, analyzer, comparator)
+        y = _render_compact_table(
+            pdf, subs, tag, y, analyzer, comparator, show_diff=show_diff
+        )
         pdf.set_y(y + 5)
 
     try:
@@ -976,6 +996,17 @@ def main() -> None:
     )
     parser.add_argument("font_path", help="Path to the .ttf or .otf font file")
     parser.add_argument("--output", "-o", help="Path to save the PDF report (optional)")
+    parser.add_argument(
+        "--no-diff",
+        action="store_true",
+        help="Disable visual difference information in PDF",
+    )
+    parser.add_argument(
+        "--min-ratio",
+        type=float,
+        default=0.0,
+        help="Skip glyph pairs with ratio diff score below this value (default: 0.0)",
+    )
     args = parser.parse_args()
 
     font_path = Path(args.font_path)
@@ -997,7 +1028,13 @@ def main() -> None:
     if args.output:
         actual_font_path = analyzer.create_modified_font()
         try:
-            render_pdf_report(analyzer, Path(args.output), actual_font_path)
+            render_pdf_report(
+                analyzer,
+                Path(args.output),
+                actual_font_path,
+                show_diff=not args.no_diff,
+                min_ratio=args.min_ratio,
+            )
         finally:
             if actual_font_path != font_path and actual_font_path.exists():
                 actual_font_path.unlink()
