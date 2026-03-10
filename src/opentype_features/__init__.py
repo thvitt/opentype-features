@@ -110,6 +110,17 @@ class FontAnalyzer:
                             tags.add(record.FeatureTag)
         return tags
 
+    def get_figure_chars(self) -> str:
+        """Return a string of all characters involved in figure substitutions."""
+        fig_tags: set[str] = {"lnum", "onum", "pnum", "tnum"}
+        chars: set[str] = set("0123456789")
+        for tag in fig_tags:
+            if tag in self.feature_substitutions:
+                for sub in self.feature_substitutions[tag]:
+                    for char in sub.input_chars:
+                        chars.add(char)
+        return "".join(sorted(chars))
+
     def analyze(self) -> None:
         """Analyze the font's GSUB table."""
         if "GSUB" not in self.font:
@@ -362,6 +373,8 @@ def _render_figures_section(
     pdf.cell(0, 10, "Figures", ln=True)
     y = pdf.get_y()
 
+    fig_chars = analyzer.get_figure_chars()
+
     v_options: list[str | None] = [None]
     if "lnum" in supported:
         v_options.append("lnum")
@@ -399,7 +412,7 @@ def _render_figures_section(
             pdf.set_font("TargetFont", "", 12)
             pdf.set_text_color(0)
             pdf.set_text_shaping(use_shaping_engine=True, features=features)
-            pdf.cell(0, 10, "0 1 2 3 4 5 6 7 8 9", align="L")
+            pdf.cell(0, 10, fig_chars, align="L")
             y += 10
 
     return y + 5

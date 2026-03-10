@@ -79,6 +79,23 @@ def test_get_tag_name(analyzer):
     assert analyzer.get_tag_name("unknown_tag") == "unknown_tag"
 
 
+def test_get_figure_chars(analyzer):
+    """Test collection of characters for the figures section."""
+    analyzer.feature_substitutions = {
+        "lnum": [Substitution("a", "a", "A", "A", "lnum")],
+        "onum": [Substitution("0", "0", "0.old", "0", "onum")],
+        "other": [Substitution("x", "x", "X", "X", "other")],
+    }
+    # Should include 0-9 plus 'a' from lnum, but not 'x' from other
+    chars = analyzer.get_figure_chars()
+    expected_len = 11  # 0-9 (10) + 'a' (1)
+    assert "0" in chars
+    assert "9" in chars
+    assert "a" in chars
+    assert "x" not in chars
+    assert len(chars) == expected_len
+
+
 def test_substitution_is_simple():
     """Test the is_simple property of Substitution."""
     # 1-to-1 mapping
