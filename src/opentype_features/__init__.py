@@ -46,7 +46,8 @@ class Substitution:
     output_chars: str
     feature_tag: str
     languages: tuple[str, ...] = ()
-    difference: float = 1.0
+    diff_total: float = 1.0
+    diff_ratio: float = 1.0
 
     @property
     def has_one_to_one_chars(self) -> bool:
@@ -69,32 +70,42 @@ class VisualComparator:
 
     def get_difference_score(
         self, text: str, feature_tag: str, languages: tuple[str, ...] = ()
-    ) -> float:
+    ) -> tuple[float, float]:
         """
-        Calculate a difference score between renderings.
+        Calculate difference scores between renderings.
 
         Returns:
-            A score where 0.0 is identical and higher is more different.
+            (total_diff, ratio_diff)
+            total_diff: (changed pixels) / (total pixels)
+            ratio_diff: (added + removed pixels) / (common pixels)
 
         """
         # First check if there's any technical difference
         if not self.is_visually_different(text, feature_tag, languages):
-            return 0.0
+            return 0.0, 0.0
 
         # Then measure pixel difference for small vs large
         img_off, img_on = self._render_pair(text, feature_tag, languages)
 
         # Use numpy for pixel-wise difference
-        # Images from _render_pair are already the same size and aligned
-        arr_off = np.array(img_off, dtype=np.float32)
-        arr_on = np.array(img_on, dtype=np.float32)
+        mask_threshold = 128
+        arr_off = np.array(img_off) > mask_threshold
+        arr_on = np.array(img_on) > mask_threshold
 
-        w, h = img_off.size
-        p_diff_threshold = 10
-        diff = np.abs(arr_off - arr_on)
-        diff_count = np.sum(diff > p_diff_threshold)
+        common = np.sum(arr_off & arr_on)
+        only_off = np.sum(arr_off & ~arr_on)
+        only_on = np.sum(~arr_off & arr_on)
 
-        return float(diff_count / (w * h))
+        total_pixels = arr_off.size
+        diff_total = float((only_off + only_on) / total_pixels)
+
+        # Avoid division by zero
+        if common > 0:
+            diff_ratio = float((only_off + only_on) / common)
+        else:
+            diff_ratio = 1.0 if (only_off + only_on) > 0 else 0.0
+
+        return diff_total, diff_ratio
 
     def get_diff_image(
         self, text: str, feature_tag: str, languages: tuple[str, ...] = ()
@@ -137,9 +148,11 @@ class VisualComparator:
     def _render_pair(
         self, text: str, feature_tag: str, languages: tuple[str, ...] = ()
     ) -> tuple[Image.Image, Image.Image]:
-        """Render both off and on states aligned to the same baseline."""
+        """Render both off and on states aligned to the same baseline and fixed height."""
+        # Use a very wide canvas initially
         w_large = self.size * (len(text) + 2) * 2
         h_large = self.size * 4
+        baseline_y = self.size * 2
 
         img_off = Image.new("L", (w_large, h_large), 0)
         img_on = Image.new("L", (w_large, h_large), 0)
@@ -147,41 +160,56 @@ class VisualComparator:
         # Render Off
         draw_off = ImageDraw.Draw(img_off)
         draw_off.text(
-            (self.size, self.size * 2), text, font=self.pil_font, fill=255, features=[]
+            (self.size, baseline_y), text, font=self.pil_font, fill=255, anchor="ls"
         )
 
         # Render On
         draw_on = ImageDraw.Draw(img_on)
         draw_on.text(
-            (self.size, self.size * 2),
+            (self.size, baseline_y),
             text,
             font=self.pil_font,
             fill=255,
             features=[feature_tag],
+            anchor="ls",
         )
 
-        # Find common bounding box to keep them aligned
+        # Get metrics for vertical cropping
+        ascent, descent = self.pil_font.getmetrics()
+        # Crop to a fixed height around the baseline
+        # Add 10% padding
+        padding = int(self.size * 0.1)
+        y_start = baseline_y - ascent - padding
+        y_end = baseline_y + descent + padding
+
+        # Find horizontal bounds
         bbox_off = img_off.getbbox()
         bbox_on = img_on.getbbox()
 
         if bbox_off is None and bbox_on is None:
-            return Image.new("L", (1, 1), 0), Image.new("L", (1, 1), 0)
+            return (
+                Image.new("L", (1, y_end - y_start), 0),
+                Image.new("L", (1, y_end - y_start), 0),
+            )
 
         # Ensure we have both boxes for calculations
-        final_bbox_off = bbox_off if bbox_off is not None else bbox_on
-        final_bbox_on = bbox_on if bbox_on is not None else bbox_off
+        final_bbox_off = bbox_off
+        if final_bbox_off is None:
+            final_bbox_off = bbox_on
+
+        final_bbox_on = bbox_on
+        if final_bbox_on is None:
+            final_bbox_on = bbox_off
 
         # final_bbox_off and final_bbox_on are now guaranteed not None
         # because of the initial check
         assert final_bbox_off is not None
         assert final_bbox_on is not None
 
-        common_bbox = (
-            min(final_bbox_off[0], final_bbox_on[0]),
-            min(final_bbox_off[1], final_bbox_on[1]),
-            max(final_bbox_off[2], final_bbox_on[2]),
-            max(final_bbox_off[3], final_bbox_on[3]),
-        )
+        x_start = min(final_bbox_off[0], final_bbox_on[0]) - padding
+        x_end = max(final_bbox_off[2], final_bbox_on[2]) + padding
+
+        common_bbox = (x_start, y_start, x_end, y_end)
 
         return img_off.crop(common_bbox), img_on.crop(common_bbox)
 
@@ -664,8 +692,20 @@ def _render_chunk_row(
         if mode == "diff":
             # Render diff bitmap ONLY in diff mode
             diff_img = comparator.get_diff_image(sub.input_chars, tag, sub.languages)
-            img_h = ROW_HEIGHT - 2
-            img_w = (diff_img.width / diff_img.height) * img_h
+
+            # Constant resolution: scale based on fixed pixel height
+            # Font height in pixels: ascent + descent + 20% padding
+            ascent, descent = comparator.pil_font.getmetrics()
+            total_px_h = ascent + descent + int(comparator.size * 0.2)
+
+            # Target height in PDF (mm)
+            target_mm_h = ROW_HEIGHT - 2
+            scale = target_mm_h / total_px_h
+
+            img_h = target_mm_h
+            img_w = diff_img.width * scale
+
+            # Constrain width if it exceeds cell width
             if img_w > width - 2:
                 img_w = width - 2
                 img_h = (diff_img.height / diff_img.width) * img_w
@@ -676,7 +716,7 @@ def _render_chunk_row(
             # Advance X position
             pdf.set_xy(x_pos + width, y)
         elif mode == "on":
-            if sub.difference < DIFF_THRESHOLD_SMALL:
+            if sub.diff_total < DIFF_THRESHOLD_SMALL:
                 # Subtle difference overlay: off (light gray) + on (red)
                 pdf.set_text_color(220)
                 pdf.set_text_shaping(use_shaping_engine=False)
@@ -695,13 +735,14 @@ def _render_chunk_row(
             # Score label
             current_y = pdf.get_y()
             pdf.set_xy(x_pos, current_y + ROW_HEIGHT - 2)
-            pdf.set_font("Helvetica", "I", 4)
+            pdf.set_font("Helvetica", "I", 3)
             pdf.set_text_color(180)
-            score_text = f"{sub.difference:.1%}"
+            score_text = f"t:{sub.diff_total:.1%} r:{sub.diff_ratio:.1%}"
             pdf.cell(width, 2, score_text, align="C")
             pdf.set_xy(x_pos + width, current_y)
             pdf.set_font("TargetFont", "", 10)
             pdf.set_text_color(0)
+
         else:
             # Mode 'off': Normal rendering
             pdf.set_text_color(0)
@@ -871,8 +912,10 @@ def render_pdf_report(
         # Calculate differences and filter
         scored_subs = []
         for s in analyzer.feature_substitutions[tag]:
-            score = comparator.get_difference_score(s.input_chars, tag, s.languages)
-            if score > DIFF_THRESHOLD_NONE:
+            diff_total, diff_ratio = comparator.get_difference_score(
+                s.input_chars, tag, s.languages
+            )
+            if diff_total > DIFF_THRESHOLD_NONE:
                 scored_subs.append(
                     Substitution(
                         input_glyphs=s.input_glyphs,
@@ -881,7 +924,8 @@ def render_pdf_report(
                         output_chars=s.output_chars,
                         feature_tag=s.feature_tag,
                         languages=s.languages,
-                        difference=score,
+                        diff_total=diff_total,
+                        diff_ratio=diff_ratio,
                     )
                 )
 
