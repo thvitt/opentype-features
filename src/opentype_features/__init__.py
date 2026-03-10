@@ -97,6 +97,19 @@ class FontAnalyzer:
             return f"glyph{int(glyph_name[5:])}"
         return glyph_name
 
+    def get_supported_features(self) -> set[str]:
+        """Return all feature tags supported by the font (GSUB and GPOS)."""
+        tags = set()
+        for table_tag in ["GSUB", "GPOS"]:
+            if table_tag in self.font:
+                table_obj = self.font[table_tag]
+                if hasattr(table_obj, "table"):
+                    table = table_obj.table
+                    if hasattr(table, "FeatureList") and table.FeatureList:
+                        for record in table.FeatureList.FeatureRecord:
+                            tags.add(record.FeatureTag)
+        return tags
+
     def analyze(self) -> None:
         """Analyze the font's GSUB table."""
         if "GSUB" not in self.font:
@@ -339,6 +352,59 @@ def _render_compact_table(
     return y
 
 
+def _render_figures_section(
+    pdf: FPDF, analyzer: FontAnalyzer, supported: set[str], y: float
+) -> float:
+    """Render a combined section for figure feature combinations."""
+    pdf.start_section("Figures", level=0)
+    pdf.set_font("Helvetica", "B", 12)
+    pdf.set_text_color(0)
+    pdf.cell(0, 10, "Figures", ln=True)
+    y = pdf.get_y()
+
+    v_options: list[str | None] = [None]
+    if "lnum" in supported:
+        v_options.append("lnum")
+    if "onum" in supported:
+        v_options.append("onum")
+
+    h_options: list[str | None] = [None]
+    if "pnum" in supported:
+        h_options.append("pnum")
+    if "tnum" in supported:
+        h_options.append("tnum")
+
+    for v in v_options:
+        for h in h_options:
+            if y + 10 > PAGE_BOTTOM_MARGIN:
+                pdf.add_page()
+                y = 15
+
+            features = {}
+            parts = []
+            if v:
+                features[v] = True
+                parts.append(analyzer.get_tag_name(v))
+            if h:
+                features[h] = True
+                parts.append(analyzer.get_tag_name(h))
+
+            label = " + ".join(parts) if parts else "Default"
+
+            pdf.set_xy(10, y)
+            pdf.set_font("Helvetica", "", 8)
+            pdf.set_text_color(100)
+            pdf.cell(50, 10, label, align="L")
+
+            pdf.set_font("TargetFont", "", 12)
+            pdf.set_text_color(0)
+            pdf.set_text_shaping(use_shaping_engine=True, features=features)
+            pdf.cell(0, 10, "0 1 2 3 4 5 6 7 8 9", align="L")
+            y += 10
+
+    return y + 5
+
+
 def _render_substitution_unit(pdf: FPDF, x: float, y: float, sub: Substitution) -> None:
     """Render a single substitution unit (input, off, on, output)."""
     pdf.set_xy(x, y)
@@ -377,7 +443,19 @@ def render_pdf_report(
         print(f"Warning: Could not embed font for PDF: {e}")
         return
 
-    for tag in sorted(analyzer.feature_substitutions.keys()):
+    supported = analyzer.get_supported_features()
+    fig_tags = {"lnum", "onum", "pnum", "tnum"}
+
+    y = pdf.get_y()
+    if supported & fig_tags:
+        y = _render_figures_section(pdf, analyzer, supported, y)
+        pdf.set_y(y)
+
+    remaining_tags = [
+        t for t in sorted(analyzer.feature_substitutions.keys()) if t not in fig_tags
+    ]
+
+    for tag in remaining_tags:
         subs = analyzer.feature_substitutions[tag]
         friendly_name = analyzer.get_tag_name(tag)
 
