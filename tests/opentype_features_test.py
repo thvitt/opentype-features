@@ -83,17 +83,19 @@ def test_get_figure_chars(analyzer):
     """Test collection of characters for the figures section."""
     analyzer.feature_substitutions = {
         "lnum": [Substitution("a", "a", "A", "A", "lnum")],
-        "onum": [Substitution("0", "0", "0.old", "0", "onum")],
+        "onum": [
+            Substitution("0", "0", "0.old", "0", "onum"),
+            Substitution("pua", chr(PUA_START), "x", "x", "onum"),
+            Substitution("%", "%", "%.alt", "%", "onum"),
+        ],
         "other": [Substitution("x", "x", "X", "X", "other")],
     }
-    # Should include 0-9 plus 'a' from lnum, but not 'x' from other
+    # Should be "0123456789" + sorted("%", "a")
     chars = analyzer.get_figure_chars()
-    expected_len = 11  # 0-9 (10) + 'a' (1)
-    assert "0" in chars
-    assert "9" in chars
-    assert "a" in chars
+    assert chars.startswith("0123456789")
+    assert chars == "0123456789%a"
     assert "x" not in chars
-    assert len(chars) == expected_len
+    assert chr(PUA_START) not in chars
 
 
 def test_substitution_is_simple():

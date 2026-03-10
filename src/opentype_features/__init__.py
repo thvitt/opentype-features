@@ -113,13 +113,21 @@ class FontAnalyzer:
     def get_figure_chars(self) -> str:
         """Return a string of all characters involved in figure substitutions."""
         fig_tags: set[str] = {"lnum", "onum", "pnum", "tnum"}
-        chars: set[str] = set("0123456789")
+        # Start with standard digits
+        fig_chars: list[str] = list("0123456789")
+        extra_chars: set[str] = set()
+
         for tag in fig_tags:
             if tag in self.feature_substitutions:
                 for sub in self.feature_substitutions[tag]:
                     for char in sub.input_chars:
-                        chars.add(char)
-        return "".join(sorted(chars))
+                        # Only include if it's not a standard digit and not a PUA character
+                        if "0" <= char <= "9":
+                            continue
+                        if ord(char) < PUA_START:
+                            extra_chars.add(char)
+
+        return "".join(fig_chars) + "".join(sorted(extra_chars))
 
     def analyze(self) -> None:
         """Analyze the font's GSUB table."""
