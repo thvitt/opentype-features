@@ -75,6 +75,7 @@ source = { editable = "." }
 dependencies = [
     { name = "fonttools" },
     { name = "fpdf2" },
+    { name = "pillow" },
     { name = "uharfbuzz" },
 ]
 
@@ -89,6 +90,7 @@ dev = [
 requires-dist = [
     { name = "fonttools", specifier = ">=4.61.1" },
     { name = "fpdf2", specifier = ">=2.8.5" },
+    { name = "pillow", specifier = ">=12.1.0" },
     { name = "uharfbuzz", specifier = ">=0.53.3" },
 ]
 

@@ -7,6 +7,7 @@ from opentype_features import (
     PUA_START,
     FontAnalyzer,
     Substitution,
+    VisualComparator,
     get_feature_priority,
 )
 
@@ -147,17 +148,38 @@ def test_substitution_has_one_to_one_chars():
     """Test the has_one_to_one_chars property of Substitution."""
     # 1-to-1 mapping
     # Note: input_chars/output_chars represent the character sequences
-    sub1 = Substitution("A", "A", "A.alt", "A", "salt")
+    sub1 = Substitution("A", "A", "A.alt", "A", "salt", difference=1.0)
     assert sub1.has_one_to_one_chars
 
     # Many-to-1 mapping (ligature)
-    sub2 = Substitution("f f i", "ffi", "ffi.liga", "ﬁ", "liga")
+    sub2 = Substitution("f f i", "ffi", "ffi.liga", "ﬁ", "liga", difference=1.0)
     assert not sub2.has_one_to_one_chars
 
     # 1-to-many mapping (multiple substitution)
-    sub3 = Substitution("ffi.liga", "ﬁ", "f f i", "ffi", "ccmp")
+    sub3 = Substitution("ffi.liga", "ﬁ", "f f i", "ffi", "ccmp", difference=1.0)
     assert not sub3.has_one_to_one_chars
 
     # PUA mapping (still 1-to-1)
-    sub4 = Substitution("glyph00499", "\ue000", "glyph00499.alt", "\ue001", "salt")
+    sub4 = Substitution(
+        "glyph00499", "\ue000", "glyph00499.alt", "\ue001", "salt", difference=1.0
+    )
     assert sub4.has_one_to_one_chars
+
+
+def test_visual_comparator_eb_garamond():
+    """Test VisualComparator with a real font."""
+    font_path = Path("EBGaramond12-Regular.ttf")
+    if not font_path.exists():
+        pytest.skip("EBGaramond12-Regular.ttf not found")
+
+    vc = VisualComparator(font_path)
+
+    # Small caps: a -> A.sc
+    assert vc.is_visually_different("a", "smcp")
+    score = vc.get_difference_score("a", "smcp")
+    diff_threshold = 0.01
+    assert score > diff_threshold  # Should see some difference
+
+    # Feature 'smcp' should not change digit '0'
+    assert not vc.is_visually_different("0", "smcp")
+    assert vc.get_difference_score("0", "smcp") == 0.0

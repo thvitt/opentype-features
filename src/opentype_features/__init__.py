@@ -7,8 +7,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import uharfbuzz as hb
 from fontTools.ttLib import TTFont
 from fpdf import FPDF
+from PIL import Image, ImageDraw, ImageFont
 
 from opentype_features.feature_names import FEATURE_NAMES, LANGUAGE_NAMES
 
@@ -28,6 +30,10 @@ ROW_HEIGHT = 8
 PAGE_BOTTOM_MARGIN = 275
 COLUMN_RENDER_WIDTH = 15
 
+# Visual Difference Thresholds
+DIFF_THRESHOLD_NONE = 0.0001  # Technical but no visual difference
+DIFF_THRESHOLD_SMALL = 0.02  # Subtle visual difference
+
 
 @dataclass(frozen=True)
 class Substitution:
@@ -39,6 +45,7 @@ class Substitution:
     output_chars: str
     feature_tag: str
     languages: tuple[str, ...] = ()
+    difference: float = 1.0
 
     @property
     def has_one_to_one_chars(self) -> bool:
@@ -46,17 +53,160 @@ class Substitution:
         return len(self.input_chars) == 1 and len(self.output_chars) == 1
 
 
+class VisualComparator:
+    """Compares visual renderings of characters with and without features."""
+
+    def __init__(self, font_path: Path) -> None:
+        """Initialize with font data."""
+        self.font_path = font_path
+        with font_path.open("rb") as f:
+            self.font_data = f.read()
+        self.face = hb.Face(self.font_data)  # type: ignore
+        self.font = hb.Font(self.face)  # type: ignore
+        self.size = 32
+        self.pil_font = ImageFont.truetype(str(font_path), self.size)
+
+    def get_difference_score(
+        self, text: str, feature_tag: str, languages: tuple[str, ...] = ()
+    ) -> float:
+        """
+        Calculate a difference score between renderings.
+
+        Returns:
+            A score where 0.0 is identical and higher is more different.
+
+        """
+        # First check if there's any technical difference
+        if not self.is_visually_different(text, feature_tag, languages):
+            return 0.0
+
+        # Then measure pixel difference for small vs large
+        img_off = self._render(text, {}, languages)
+        img_on = self._render(text, {feature_tag: True}, languages)
+
+        # Ensure same size for comparison
+        w = max(img_off.width, img_on.width)
+        h = max(img_off.height, img_on.height)
+
+        canvas_off = Image.new("L", (w, h), 0)
+        canvas_on = Image.new("L", (w, h), 0)
+        canvas_off.paste(img_off, (0, 0))
+        canvas_on.paste(img_on, (0, 0))
+
+        # Pixel-wise difference
+        diff_count = 0
+        p_off = canvas_off.load()
+        p_on = canvas_on.load()
+        if p_off is None or p_on is None:
+            return 1.0
+
+        p_diff_threshold = 10
+        for y in range(h):
+            for x in range(w):
+                # Pixel values can be int (L) or tuple (RGB), but we use L
+                v_off: Any = p_off[x, y]
+                v_on: Any = p_on[x, y]
+                if abs(float(v_off) - float(v_on)) > p_diff_threshold:
+                    diff_count += 1
+
+        return diff_count / (w * h)
+
+    def _render(
+        self, text: str, features: dict[str, bool], languages: tuple[str, ...] = ()
+    ) -> Image.Image:
+        """Render text to a grayscale image."""
+        # Use Pillow for rendering
+        img = Image.new("L", (self.size * len(text) * 2, self.size * 2), 0)
+        draw = ImageDraw.Draw(img)
+
+        # Build feature list for Pillow
+        feat_list = []
+        for f, val in features.items():
+            if val:
+                feat_list.append(f)
+
+        # Note: Pillow's shaping doesn't easily support OpenType language tags
+        # but we can try to guess what's most relevant.
+        # For now, we mainly rely on features.
+        draw.text(
+            (self.size, self.size),
+            text,
+            font=self.pil_font,
+            fill=255,
+            features=feat_list,
+        )
+        return img.crop(img.getbbox() or (0, 0, 1, 1))
+
+    def is_visually_different(
+        self, text: str, feature_tag: str, languages: tuple[str, ...] = ()
+    ) -> bool:
+        """
+        Check if rendering with features is visually different from without.
+
+        Returns:
+            True if there's any difference in glyph IDs or positions.
+
+        """
+        # Explicitly disable common defaults in 'off' state to ensure we see the change
+        off_features = {"liga": False, "calt": False, "kern": False}
+        on_features = {**off_features, feature_tag: True}
+
+        buf_off = hb.Buffer()  # type: ignore
+        buf_off.add_str(text)
+        buf_off.guess_segment_properties()
+        # Set language if available (use the first one for comparison)
+        if languages:
+            _script, lang = (
+                languages[0].split("/")
+                if "/" in languages[0]
+                else ("latn", languages[0])
+            )
+            buf_off.language = lang
+
+        hb.shape(self.font, buf_off, off_features)  # type: ignore
+
+        buf_on = hb.Buffer()  # type: ignore
+        buf_on.add_str(text)
+        buf_on.guess_segment_properties()
+        if languages:
+            _script, lang = (
+                languages[0].split("/")
+                if "/" in languages[0]
+                else ("latn", languages[0])
+            )
+            buf_on.language = lang
+
+        hb.shape(self.font, buf_on, on_features)  # type: ignore
+
+        info_off = buf_off.glyph_infos
+        info_on = buf_on.glyph_infos
+
+        if len(info_off) != len(info_on):
+            return True
+
+        for i in range(len(info_off)):
+            if info_off[i].codepoint != info_on[i].codepoint:
+                return True
+
+        pos_off = buf_off.glyph_positions
+        pos_on = buf_on.glyph_positions
+        for i in range(len(pos_off)):
+            if (
+                pos_off[i].x_advance != pos_on[i].x_advance
+                or pos_off[i].x_offset != pos_on[i].x_offset
+                or pos_off[i].y_advance != pos_on[i].y_advance
+                or pos_off[i].y_offset != pos_on[i].y_offset
+            ):
+                return True
+
+        return False
+
+
 class FontAnalyzer:
     """Analyzes a font for OpenType features and generates reports."""
 
     def __init__(self, font_path: Path) -> None:
-        """
-        Initialize the FontAnalyzer.
-
-        Args:
-            font_path: The path to the font file to analyze.
-
-        """
+        """Initialize the FontAnalyzer."""
         self.font_path = font_path
         self.font = TTFont(str(font_path))
         self.reverse_cmap = self._build_reverse_cmap()
@@ -422,11 +572,15 @@ def _render_chunk_row(
     pdf.set_font("Helvetica", "I", 7)
     pdf.cell(label_width, ROW_HEIGHT, f"{label}:", align="L")
 
-    pdf.set_text_color(0)
     pdf.set_font("TargetFont", "", 10)
-    pdf.set_text_shaping(use_shaping_engine=shaping, features={tag: shaping})
 
     for sub, width in chunk:
+        pdf.set_text_shaping(use_shaping_engine=shaping, features={tag: shaping})
+        if shaping and sub.difference < DIFF_THRESHOLD_SMALL:
+            pdf.set_text_color(200, 50, 50)  # Highlight subtle difference
+        else:
+            pdf.set_text_color(0)
+
         x_pos = pdf.get_x()
         pdf.cell(width, ROW_HEIGHT, sub.input_chars, align="C")
 
@@ -577,6 +731,7 @@ def render_pdf_report(
 
     supported = analyzer.get_supported_features()
     fig_tags = {"lnum", "onum", "pnum", "tnum"}
+    comparator = VisualComparator(analyzer.font_path)
 
     y = pdf.get_y()
     if supported & fig_tags:
@@ -589,7 +744,27 @@ def render_pdf_report(
     )
 
     for tag in remaining_tags:
-        subs = analyzer.feature_substitutions[tag]
+        # Calculate differences and filter
+        scored_subs = []
+        for s in analyzer.feature_substitutions[tag]:
+            score = comparator.get_difference_score(s.input_chars, tag, s.languages)
+            if score > DIFF_THRESHOLD_NONE:
+                scored_subs.append(
+                    Substitution(
+                        input_glyphs=s.input_glyphs,
+                        input_chars=s.input_chars,
+                        output_glyphs=s.output_glyphs,
+                        output_chars=s.output_chars,
+                        feature_tag=s.feature_tag,
+                        languages=s.languages,
+                        difference=score,
+                    )
+                )
+
+        if not scored_subs:
+            continue
+
+        subs = scored_subs
         friendly_name = analyzer.get_tag_name(tag)
 
         if pdf.get_y() > PAGE_BREAK_THRESHOLD:
