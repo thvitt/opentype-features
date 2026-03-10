@@ -3,7 +3,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from opentype_features import PUA_START, FontAnalyzer
+from opentype_features import PUA_START, FontAnalyzer, Substitution
 
 
 @pytest.fixture
@@ -77,3 +77,23 @@ def test_get_tag_name(analyzer):
     assert analyzer.get_tag_name("liga") == "Standard Ligatures"
     # Fallback to tag itself
     assert analyzer.get_tag_name("unknown_tag") == "unknown_tag"
+
+
+def test_substitution_is_simple():
+    """Test the is_simple property of Substitution."""
+    # 1-to-1 mapping
+    # Note: input_chars/output_chars represent the character sequences
+    sub1 = Substitution("A", "A", "A.alt", "A", "salt")
+    assert sub1.is_simple
+
+    # Many-to-1 mapping (ligature)
+    sub2 = Substitution("f f i", "ffi", "ffi.liga", "ﬁ", "liga")
+    assert not sub2.is_simple
+
+    # 1-to-many mapping (multiple substitution)
+    sub3 = Substitution("ffi.liga", "ﬁ", "f f i", "ffi", "ccmp")
+    assert not sub3.is_simple
+
+    # PUA mapping (still 1-to-1)
+    sub4 = Substitution("glyph00499", "\ue000", "glyph00499.alt", "\ue001", "salt")
+    assert sub4.is_simple

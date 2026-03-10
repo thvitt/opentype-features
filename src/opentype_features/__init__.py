@@ -44,6 +44,11 @@ class Substitution:
     output_chars: str
     feature_tag: str
 
+    @property
+    def is_simple(self) -> bool:
+        """Check if this is a 1-to-1 mapping."""
+        return len(self.input_chars) == 1 and len(self.output_chars) == 1
+
 
 class FontAnalyzer:
     """Analyzes a font for OpenType features and generates reports."""
@@ -287,6 +292,53 @@ def _draw_all_headers(pdf: FPDF, y: float, multi: bool) -> float:
     return y + ROW_HEIGHT
 
 
+def _render_compact_table(
+    pdf: FPDF, subs: list[Substitution], tag: str, y: float
+) -> float:
+    """Render 1-to-1 mappings in a compact horizontal table."""
+    cell_width = 13
+    max_width = 190
+    label_width = 15
+    chars_per_row = int((max_width - label_width) / cell_width)
+
+    for i in range(0, len(subs), chars_per_row):
+        if y + 2 * ROW_HEIGHT + 5 > PAGE_BOTTOM_MARGIN:
+            pdf.add_page()
+            y = 15
+
+        chunk = subs[i : i + chars_per_row]
+
+        # Row 1: Off
+        pdf.set_xy(10, y)
+        pdf.set_text_color(120)
+        pdf.set_font("Helvetica", "I", 7)
+        pdf.cell(label_width, ROW_HEIGHT, "off:", align="L")
+
+        pdf.set_text_color(0)
+        pdf.set_font("TargetFont", "", 10)
+        pdf.set_text_shaping(use_shaping_engine=False)
+        for sub in chunk:
+            pdf.cell(cell_width, ROW_HEIGHT, sub.input_chars, align="C")
+
+        y += ROW_HEIGHT
+
+        # Row 2: On
+        pdf.set_xy(10, y)
+        pdf.set_text_color(120)
+        pdf.set_font("Helvetica", "I", 7)
+        pdf.cell(label_width, ROW_HEIGHT, "on:", align="L")
+
+        pdf.set_text_color(0)
+        pdf.set_font("TargetFont", "", 10)
+        pdf.set_text_shaping(use_shaping_engine=True, features={tag: True})
+        for sub in chunk:
+            pdf.cell(cell_width, ROW_HEIGHT, sub.input_chars, align="C")
+
+        y += ROW_HEIGHT + 4  # Padding between chunks
+
+    return y
+
+
 def _render_substitution_unit(pdf: FPDF, x: float, y: float, sub: Substitution) -> None:
     """Render a single substitution unit (input, off, on, output)."""
     pdf.set_xy(x, y)
@@ -337,24 +389,35 @@ def render_pdf_report(
         pdf.set_text_color(0)
         pdf.cell(0, 10, f"Feature: {tag} ({friendly_name})", ln=True)
 
-        multi = len(subs) > MIN_SUBS_FOR_MULTI_COLUMN
+        simple_subs = [s for s in subs if s.is_simple]
+        complex_subs = [s for s in subs if not s.is_simple]
+
         y = pdf.get_y()
-        y = _draw_all_headers(pdf, y, multi)
 
-        for i in range(0, len(subs), 2):
-            if y + ROW_HEIGHT > PAGE_BOTTOM_MARGIN:
-                pdf.add_page()
-                y = 15
-                y = _draw_all_headers(pdf, y, multi)
+        if simple_subs:
+            y = _render_compact_table(pdf, simple_subs, tag, y)
 
-            _render_substitution_unit(pdf, 10, y, subs[i])
+        if complex_subs:
+            multi = len(complex_subs) > MIN_SUBS_FOR_MULTI_COLUMN
+            y = _draw_all_headers(pdf, y, multi)
 
-            if i + 1 < len(subs):
-                _render_substitution_unit(
-                    pdf, 10 + TOTAL_UNIT_WIDTH + GUTTER_WIDTH, y, subs[i + 1]
-                )
+            for i in range(0, len(complex_subs), 2):
+                if y + ROW_HEIGHT > PAGE_BOTTOM_MARGIN:
+                    pdf.add_page()
+                    y = 15
+                    y = _draw_all_headers(pdf, y, multi)
 
-            y += ROW_HEIGHT
+                _render_substitution_unit(pdf, 10, y, complex_subs[i])
+
+                if i + 1 < len(complex_subs):
+                    _render_substitution_unit(
+                        pdf,
+                        10 + TOTAL_UNIT_WIDTH + GUTTER_WIDTH,
+                        y,
+                        complex_subs[i + 1],
+                    )
+
+                y += ROW_HEIGHT
 
         pdf.set_y(y + 5)
 
