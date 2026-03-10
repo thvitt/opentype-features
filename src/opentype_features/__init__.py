@@ -562,19 +562,45 @@ def _render_compact_table(
         if not chunk:
             break
 
-        row_height = ROW_HEIGHT
-        if any(s.feature_tag == "locl" and s.languages for s, w in chunk):
-            row_height += 3
+        # We now have 3 rows: off, on, diff
+        # Check if we need a page break
+        rows_to_render = 3
+        total_chunk_height = rows_to_render * ROW_HEIGHT + 5
 
-        if y + 2 * row_height + 5 > PAGE_BOTTOM_MARGIN:
+        # Extra height for labels if needed
+        if any(s.feature_tag == "locl" and s.languages for s, w in chunk):
+            total_chunk_height += 3
+
+        if y + total_chunk_height > PAGE_BOTTOM_MARGIN:
             pdf.add_page()
             y = 15
 
         y = _render_chunk_row(
-            pdf, chunk, "off", False, tag, y, label_width, analyzer, comparator
+            pdf,
+            chunk,
+            "off",
+            False,
+            tag,
+            y,
+            label_width,
+            analyzer,
+            comparator,
+            mode="off",
         )
         y = _render_chunk_row(
-            pdf, chunk, "on", True, tag, y, label_width, analyzer, comparator
+            pdf, chunk, "on", True, tag, y, label_width, analyzer, comparator, mode="on"
+        )
+        y = _render_chunk_row(
+            pdf,
+            chunk,
+            "diff",
+            True,
+            tag,
+            y,
+            label_width,
+            analyzer,
+            comparator,
+            mode="diff",
         )
         y += 4  # Padding between chunks
 
@@ -613,8 +639,9 @@ def _render_chunk_row(
     label_width: float,
     analyzer: FontAnalyzer,
     comparator: VisualComparator,
+    mode: str = "off",
 ) -> float:
-    """Render a single row (off or on) for a chunk of substitutions."""
+    """Render a single row (off, on, or diff) for a chunk of substitutions."""
     pdf.set_xy(10, y)
     pdf.set_text_color(120)
     pdf.set_font("Helvetica", "I", 7)
@@ -624,22 +651,21 @@ def _render_chunk_row(
 
     for sub, width in chunk:
         x_pos = pdf.get_x()
-        if shaping:
-            # Render diff bitmap
+        if mode == "diff":
+            # Render diff bitmap ONLY in diff mode
             diff_img = comparator.get_diff_image(sub.input_chars, tag, sub.languages)
-            # Center image in cell width, keep height proportional to ROW_HEIGHT
             img_h = ROW_HEIGHT - 2
             img_w = (diff_img.width / diff_img.height) * img_h
-            # Constrain width if too large
             if img_w > width - 2:
                 img_w = width - 2
                 img_h = (diff_img.height / diff_img.width) * img_w
 
-            # Place image slightly above the baseline or center
             pdf.image(
                 diff_img, x=x_pos + (width - img_w) / 2, y=y + 1, w=img_w, h=img_h
             )
-
+            # Advance X position
+            pdf.set_xy(x_pos + width, y)
+        elif mode == "on":
             if sub.difference < DIFF_THRESHOLD_SMALL:
                 # Subtle difference overlay: off (light gray) + on (red)
                 pdf.set_text_color(220)
@@ -651,11 +677,9 @@ def _render_chunk_row(
                 pdf.set_text_shaping(use_shaping_engine=True, features={tag: True})
                 pdf.cell(width, ROW_HEIGHT, sub.input_chars, align="C")
             else:
-                # Normal rendering
+                # Normal 'on' rendering
                 pdf.set_text_color(0)
-                pdf.set_text_shaping(
-                    use_shaping_engine=shaping, features={tag: shaping}
-                )
+                pdf.set_text_shaping(use_shaping_engine=True, features={tag: True})
                 pdf.cell(width, ROW_HEIGHT, sub.input_chars, align="C")
 
             # Score label
@@ -669,12 +693,12 @@ def _render_chunk_row(
             pdf.set_font("TargetFont", "", 10)
             pdf.set_text_color(0)
         else:
-            # Off row: Normal rendering
+            # Mode 'off': Normal rendering
             pdf.set_text_color(0)
             pdf.set_text_shaping(use_shaping_engine=False)
             pdf.cell(width, ROW_HEIGHT, sub.input_chars, align="C")
 
-        if shaping and sub.feature_tag == "locl" and sub.languages:
+        if mode == "on" and sub.feature_tag == "locl" and sub.languages:
             _draw_locl_labels(pdf, x_pos, y, width, sub.languages, analyzer)
 
     return y + ROW_HEIGHT
