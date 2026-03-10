@@ -82,22 +82,14 @@ class VisualComparator:
             return 0.0
 
         # Then measure pixel difference for small vs large
-        img_off = self._render(text, {}, languages)
-        img_on = self._render(text, {feature_tag: True}, languages)
-
-        # Ensure same size for comparison
-        w = max(img_off.width, img_on.width)
-        h = max(img_off.height, img_on.height)
-
-        canvas_off = Image.new("L", (w, h), 0)
-        canvas_on = Image.new("L", (w, h), 0)
-        canvas_off.paste(img_off, (0, 0))
-        canvas_on.paste(img_on, (0, 0))
+        img_off, img_on = self._render_pair(text, feature_tag, languages)
 
         # Use numpy for pixel-wise difference
-        arr_off = np.array(canvas_off, dtype=np.float32)
-        arr_on = np.array(canvas_on, dtype=np.float32)
+        # Images from _render_pair are already the same size and aligned
+        arr_off = np.array(img_off, dtype=np.float32)
+        arr_on = np.array(img_on, dtype=np.float32)
 
+        w, h = img_off.size
         p_diff_threshold = 10
         diff = np.abs(arr_off - arr_on)
         diff_count = np.sum(diff > p_diff_threshold)
@@ -114,23 +106,16 @@ class VisualComparator:
         - Pixels only in 'off': red
         - Pixels only in 'on': green
         """
-        img_off = self._render(text, {}, languages)
-        img_on = self._render(text, {feature_tag: True}, languages)
+        img_off, img_on = self._render_pair(text, feature_tag, languages)
 
-        w = max(img_off.width, img_on.width)
-        h = max(img_off.height, img_on.height)
+        w, h = img_off.size
 
         # Threshold to binary masks for logic
         mask_threshold = 128
         pixel_max = 255
 
-        def get_mask_arr(img: Image.Image, target_w: int, target_h: int) -> np.ndarray:
-            mask = Image.new("L", (target_w, target_h), 0)
-            mask.paste(img, (0, 0))
-            return np.array(mask) > mask_threshold
-
-        mask_off = get_mask_arr(img_off, w, h)
-        mask_on = get_mask_arr(img_on, w, h)
+        mask_off = np.array(img_off) > mask_threshold
+        mask_on = np.array(img_on) > mask_threshold
 
         # Create RGB image initialized to white
         diff_arr = np.full((h, w, 3), pixel_max, dtype=np.uint8)
@@ -149,31 +134,56 @@ class VisualComparator:
 
         return Image.fromarray(diff_arr)
 
-    def _render(
-        self, text: str, features: dict[str, bool], languages: tuple[str, ...] = ()
-    ) -> Image.Image:
-        """Render text to a grayscale image."""
-        # Use Pillow for rendering
-        img = Image.new("L", (self.size * len(text) * 2, self.size * 2), 0)
-        draw = ImageDraw.Draw(img)
+    def _render_pair(
+        self, text: str, feature_tag: str, languages: tuple[str, ...] = ()
+    ) -> tuple[Image.Image, Image.Image]:
+        """Render both off and on states aligned to the same baseline."""
+        w_large = self.size * (len(text) + 2) * 2
+        h_large = self.size * 4
 
-        # Build feature list for Pillow
-        feat_list = []
-        for f, val in features.items():
-            if val:
-                feat_list.append(f)
+        img_off = Image.new("L", (w_large, h_large), 0)
+        img_on = Image.new("L", (w_large, h_large), 0)
 
-        # Note: Pillow's shaping doesn't easily support OpenType language tags
-        # but we can try to guess what's most relevant.
-        # For now, we mainly rely on features.
-        draw.text(
-            (self.size, self.size),
+        # Render Off
+        draw_off = ImageDraw.Draw(img_off)
+        draw_off.text(
+            (self.size, self.size * 2), text, font=self.pil_font, fill=255, features=[]
+        )
+
+        # Render On
+        draw_on = ImageDraw.Draw(img_on)
+        draw_on.text(
+            (self.size, self.size * 2),
             text,
             font=self.pil_font,
             fill=255,
-            features=feat_list,
+            features=[feature_tag],
         )
-        return img.crop(img.getbbox() or (0, 0, 1, 1))
+
+        # Find common bounding box to keep them aligned
+        bbox_off = img_off.getbbox()
+        bbox_on = img_on.getbbox()
+
+        if bbox_off is None and bbox_on is None:
+            return Image.new("L", (1, 1), 0), Image.new("L", (1, 1), 0)
+
+        # Ensure we have both boxes for calculations
+        final_bbox_off = bbox_off if bbox_off is not None else bbox_on
+        final_bbox_on = bbox_on if bbox_on is not None else bbox_off
+
+        # final_bbox_off and final_bbox_on are now guaranteed not None
+        # because of the initial check
+        assert final_bbox_off is not None
+        assert final_bbox_on is not None
+
+        common_bbox = (
+            min(final_bbox_off[0], final_bbox_on[0]),
+            min(final_bbox_off[1], final_bbox_on[1]),
+            max(final_bbox_off[2], final_bbox_on[2]),
+            max(final_bbox_off[3], final_bbox_on[3]),
+        )
+
+        return img_off.crop(common_bbox), img_on.crop(common_bbox)
 
     def is_visually_different(
         self, text: str, feature_tag: str, languages: tuple[str, ...] = ()
