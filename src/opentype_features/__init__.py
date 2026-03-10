@@ -592,6 +592,17 @@ def _render_chunk_row(
             pdf.set_text_shaping(use_shaping_engine=shaping, features={tag: shaping})
             pdf.cell(width, ROW_HEIGHT, sub.input_chars, align="C")
 
+        if shaping:
+            current_y = pdf.get_y()
+            pdf.set_xy(x_pos, current_y + ROW_HEIGHT - 2)
+            pdf.set_font("Helvetica", "I", 4)
+            pdf.set_text_color(180)
+            score_text = f"{sub.difference:.1%}"
+            pdf.cell(width, 2, score_text, align="C")
+            pdf.set_xy(x_pos + width, current_y)
+            pdf.set_font("TargetFont", "", 10)
+            pdf.set_text_color(0)
+
         if shaping and sub.feature_tag == "locl" and sub.languages:
             _draw_locl_labels(pdf, x_pos, y, width, sub.languages, analyzer)
 
