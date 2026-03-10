@@ -64,7 +64,7 @@ class VisualComparator:
             self.font_data = f.read()
         self.face = hb.Face(self.font_data)  # type: ignore
         self.font = hb.Font(self.face)  # type: ignore
-        self.size = 32
+        self.size = 128
         self.pil_font = ImageFont.truetype(str(font_path), self.size)
 
     def get_difference_score(
