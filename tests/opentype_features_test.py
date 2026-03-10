@@ -3,7 +3,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from opentype_features import PUA_START, FontAnalyzer, Substitution
+from opentype_features import (
+    PUA_START,
+    FontAnalyzer,
+    Substitution,
+    get_feature_priority,
+)
 
 
 @pytest.fixture
@@ -77,6 +82,46 @@ def test_get_tag_name(analyzer):
     assert analyzer.get_tag_name("liga") == "Standard Ligatures"
     # Fallback to tag itself
     assert analyzer.get_tag_name("unknown_tag") == "unknown_tag"
+
+
+def test_get_feature_priority():
+    """Test feature sorting priority."""
+    # Figures
+    p_fig = 10
+    assert get_feature_priority("lnum")[0] == p_fig
+
+    # Ligatures
+    p_liga = 20
+    p_other_liga = 21
+    assert get_feature_priority("liga")[0] == p_liga
+    assert get_feature_priority("dlig")[0] == p_other_liga
+
+    # Stylistic Alternates
+    p_salt = 30
+    assert get_feature_priority("salt")[0] == p_salt
+
+    # Stylistic Sets
+    p_ss = 40
+    assert get_feature_priority("ss01")[0] == p_ss
+    assert get_feature_priority("ss20")[0] == p_ss
+
+    # Character Variants
+    p_cv = 50
+    assert get_feature_priority("cv01")[0] == p_cv
+
+    # General
+    p_gen = 60
+    assert get_feature_priority("ccmp")[0] == p_gen
+
+    # Small/Shifted
+    p_small = 70
+    assert get_feature_priority("smcp")[0] == p_small
+    assert get_feature_priority("frac")[0] == p_small
+
+    # Relative ordering within group by tag name
+    assert get_feature_priority("dlig") == (p_other_liga, "dlig")
+    assert get_feature_priority("clig") == (p_other_liga, "clig")
+    # sorted((21, "dlig"), (21, "clig")) will put clig first
 
 
 def test_get_figure_chars(analyzer):

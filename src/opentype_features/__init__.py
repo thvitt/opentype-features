@@ -511,6 +511,52 @@ def _render_figures_section(
     return y + 5
 
 
+def get_feature_priority(tag: str) -> tuple[int, str]:
+    """Return a sorting priority for feature tags."""
+    # Priority groups:
+    # 10: Figures
+    # 20: Standard Ligatures
+    # 21: Other Ligatures
+    # 30: Stylistic Alternates
+    # 40: Stylistic Sets
+    # 50: Character Variants
+    # 60: General/Remaining
+    # 70: Smaller/Shifted
+
+    priority = 60  # Default: General
+
+    if tag in {"lnum", "onum", "pnum", "tnum"}:
+        priority = 10
+    elif tag == "liga":
+        priority = 20
+    elif tag in {"clig", "dlig", "hlig", "rlig"}:
+        priority = 21
+    elif tag == "salt":
+        priority = 30
+    elif tag.startswith("ss") and tag[2:].isdigit():
+        priority = 40
+    elif tag.startswith("cv") and tag[2:].isdigit():
+        priority = 50
+    elif tag in {
+        "smcp",
+        "c2sc",
+        "pcap",
+        "c2pc",
+        "unic",
+        "ordn",
+        "numr",
+        "dnom",
+        "frac",
+        "afrc",
+        "sinf",
+        "sups",
+        "subs",
+    }:
+        priority = 70
+
+    return (priority, tag)
+
+
 def render_pdf_report(
     analyzer: FontAnalyzer,
     output_path: Path,
@@ -537,9 +583,10 @@ def render_pdf_report(
         y = _render_figures_section(pdf, analyzer, supported, y)
         pdf.set_y(y)
 
-    remaining_tags = [
-        t for t in sorted(analyzer.feature_substitutions.keys()) if t not in fig_tags
-    ]
+    remaining_tags = sorted(
+        [t for t in analyzer.feature_substitutions if t not in fig_tags],
+        key=get_feature_priority,
+    )
 
     for tag in remaining_tags:
         subs = analyzer.feature_substitutions[tag]
