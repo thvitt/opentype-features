@@ -32,7 +32,7 @@ COLUMN_RENDER_WIDTH = 15
 
 # Visual Difference Thresholds
 DIFF_THRESHOLD_NONE = 0.0001  # Technical but no visual difference
-DIFF_THRESHOLD_SMALL = 0.02  # Subtle visual difference
+DIFF_THRESHOLD_SMALL = 0.1  # Subtle visual difference
 
 
 @dataclass(frozen=True)
@@ -575,14 +575,22 @@ def _render_chunk_row(
     pdf.set_font("TargetFont", "", 10)
 
     for sub, width in chunk:
-        pdf.set_text_shaping(use_shaping_engine=shaping, features={tag: shaping})
-        if shaping and sub.difference < DIFF_THRESHOLD_SMALL:
-            pdf.set_text_color(200, 50, 50)  # Highlight subtle difference
-        else:
-            pdf.set_text_color(0)
-
         x_pos = pdf.get_x()
-        pdf.cell(width, ROW_HEIGHT, sub.input_chars, align="C")
+        if shaping and sub.difference < DIFF_THRESHOLD_SMALL:
+            # Subtle difference overlay: off (light gray) + on (red)
+            pdf.set_text_color(220)
+            pdf.set_text_shaping(use_shaping_engine=False)
+            pdf.cell(width, ROW_HEIGHT, sub.input_chars, align="C")
+
+            pdf.set_xy(x_pos, y)
+            pdf.set_text_color(200, 50, 50)
+            pdf.set_text_shaping(use_shaping_engine=True, features={tag: True})
+            pdf.cell(width, ROW_HEIGHT, sub.input_chars, align="C")
+        else:
+            # Normal rendering
+            pdf.set_text_color(0)
+            pdf.set_text_shaping(use_shaping_engine=shaping, features={tag: shaping})
+            pdf.cell(width, ROW_HEIGHT, sub.input_chars, align="C")
 
         if shaping and sub.feature_tag == "locl" and sub.languages:
             _draw_locl_labels(pdf, x_pos, y, width, sub.languages, analyzer)
