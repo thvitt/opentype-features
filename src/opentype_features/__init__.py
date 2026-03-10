@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import uharfbuzz as hb
 from fontTools.ttLib import TTFont
 from fpdf import FPDF
@@ -93,23 +94,15 @@ class VisualComparator:
         canvas_off.paste(img_off, (0, 0))
         canvas_on.paste(img_on, (0, 0))
 
-        # Pixel-wise difference
-        diff_count = 0
-        p_off = canvas_off.load()
-        p_on = canvas_on.load()
-        if p_off is None or p_on is None:
-            return 1.0
+        # Use numpy for pixel-wise difference
+        arr_off = np.array(canvas_off, dtype=np.float32)
+        arr_on = np.array(canvas_on, dtype=np.float32)
 
         p_diff_threshold = 10
-        for y in range(h):
-            for x in range(w):
-                # Pixel values can be int (L) or tuple (RGB), but we use L
-                v_off: Any = p_off[x, y]
-                v_on: Any = p_on[x, y]
-                if abs(float(v_off) - float(v_on)) > p_diff_threshold:
-                    diff_count += 1
+        diff = np.abs(arr_off - arr_on)
+        diff_count = np.sum(diff > p_diff_threshold)
 
-        return diff_count / (w * h)
+        return float(diff_count / (w * h))
 
     def get_diff_image(
         self, text: str, feature_tag: str, languages: tuple[str, ...] = ()
@@ -131,33 +124,30 @@ class VisualComparator:
         mask_threshold = 128
         pixel_max = 255
 
-        def get_mask(img: Image.Image, target_w: int, target_h: int) -> Image.Image:
+        def get_mask_arr(img: Image.Image, target_w: int, target_h: int) -> np.ndarray:
             mask = Image.new("L", (target_w, target_h), 0)
             mask.paste(img, (0, 0))
-            return mask.point(lambda p: pixel_max if p > mask_threshold else 0)
+            return np.array(mask) > mask_threshold
 
-        mask_off = get_mask(img_off, w, h)
-        mask_on = get_mask(img_on, w, h)
+        mask_off = get_mask_arr(img_off, w, h)
+        mask_on = get_mask_arr(img_on, w, h)
 
-        diff_img = Image.new("RGB", (w, h), (pixel_max, pixel_max, pixel_max))
-        pixels = diff_img.load()
-        p_off = mask_off.load()
-        p_on = mask_on.load()
+        # Create RGB image initialized to white
+        diff_arr = np.full((h, w, 3), pixel_max, dtype=np.uint8)
 
-        if pixels is not None and p_off is not None and p_on is not None:
-            for y in range(h):
-                for x in range(w):
-                    v_off = p_off[x, y]
-                    v_on = p_on[x, y]
+        # Common pixels (light gray)
+        common = mask_off & mask_on
+        diff_arr[common] = [200, 200, 200]
 
-                    if v_off == pixel_max and v_on == pixel_max:
-                        pixels[x, y] = (200, 200, 200)  # light gray
-                    elif v_off == pixel_max and v_on == 0:
-                        pixels[x, y] = (pixel_max, 0, 0)  # red
-                    elif v_off == 0 and v_on == pixel_max:
-                        pixels[x, y] = (0, 200, 0)  # green
+        # Pixels only in 'off' (red)
+        only_off = mask_off & ~mask_on
+        diff_arr[only_off] = [pixel_max, 0, 0]
 
-        return diff_img
+        # Pixels only in 'on' (green)
+        only_on = ~mask_off & mask_on
+        diff_arr[only_on] = [0, 200, 0]
+
+        return Image.fromarray(diff_arr)
 
     def _render(
         self, text: str, features: dict[str, bool], languages: tuple[str, ...] = ()
