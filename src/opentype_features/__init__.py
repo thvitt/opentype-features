@@ -111,6 +111,54 @@ class VisualComparator:
 
         return diff_count / (w * h)
 
+    def get_diff_image(
+        self, text: str, feature_tag: str, languages: tuple[str, ...] = ()
+    ) -> Image.Image:
+        """
+        Create a visualization of differences between off and on renderings.
+
+        - Common pixels: light gray
+        - Pixels only in 'off': red
+        - Pixels only in 'on': green
+        """
+        img_off = self._render(text, {}, languages)
+        img_on = self._render(text, {feature_tag: True}, languages)
+
+        w = max(img_off.width, img_on.width)
+        h = max(img_off.height, img_on.height)
+
+        # Threshold to binary masks for logic
+        mask_threshold = 128
+        pixel_max = 255
+
+        def get_mask(img: Image.Image, target_w: int, target_h: int) -> Image.Image:
+            mask = Image.new("L", (target_w, target_h), 0)
+            mask.paste(img, (0, 0))
+            return mask.point(lambda p: pixel_max if p > mask_threshold else 0)
+
+        mask_off = get_mask(img_off, w, h)
+        mask_on = get_mask(img_on, w, h)
+
+        diff_img = Image.new("RGB", (w, h), (pixel_max, pixel_max, pixel_max))
+        pixels = diff_img.load()
+        p_off = mask_off.load()
+        p_on = mask_on.load()
+
+        if pixels is not None and p_off is not None and p_on is not None:
+            for y in range(h):
+                for x in range(w):
+                    v_off = p_off[x, y]
+                    v_on = p_on[x, y]
+
+                    if v_off == pixel_max and v_on == pixel_max:
+                        pixels[x, y] = (200, 200, 200)  # light gray
+                    elif v_off == pixel_max and v_on == 0:
+                        pixels[x, y] = (pixel_max, 0, 0)  # red
+                    elif v_off == 0 and v_on == pixel_max:
+                        pixels[x, y] = (0, 200, 0)  # green
+
+        return diff_img
+
     def _render(
         self, text: str, features: dict[str, bool], languages: tuple[str, ...] = ()
     ) -> Image.Image:
@@ -507,7 +555,12 @@ class FontAnalyzer:
 
 
 def _render_compact_table(
-    pdf: FPDF, subs: list[Substitution], tag: str, y: float, analyzer: FontAnalyzer
+    pdf: FPDF,
+    subs: list[Substitution],
+    tag: str,
+    y: float,
+    analyzer: FontAnalyzer,
+    comparator: VisualComparator,
 ) -> float:
     """Render mappings in a compact horizontal table."""
     max_width = 190
@@ -527,8 +580,12 @@ def _render_compact_table(
             pdf.add_page()
             y = 15
 
-        y = _render_chunk_row(pdf, chunk, "off", False, tag, y, label_width, analyzer)
-        y = _render_chunk_row(pdf, chunk, "on", True, tag, y, label_width, analyzer)
+        y = _render_chunk_row(
+            pdf, chunk, "off", False, tag, y, label_width, analyzer, comparator
+        )
+        y = _render_chunk_row(
+            pdf, chunk, "on", True, tag, y, label_width, analyzer, comparator
+        )
         y += 4  # Padding between chunks
 
     return y
@@ -565,6 +622,7 @@ def _render_chunk_row(
     y: float,
     label_width: float,
     analyzer: FontAnalyzer,
+    comparator: VisualComparator,
 ) -> float:
     """Render a single row (off or on) for a chunk of substitutions."""
     pdf.set_xy(10, y)
@@ -576,23 +634,41 @@ def _render_chunk_row(
 
     for sub, width in chunk:
         x_pos = pdf.get_x()
-        if shaping and sub.difference < DIFF_THRESHOLD_SMALL:
-            # Subtle difference overlay: off (light gray) + on (red)
-            pdf.set_text_color(220)
-            pdf.set_text_shaping(use_shaping_engine=False)
-            pdf.cell(width, ROW_HEIGHT, sub.input_chars, align="C")
-
-            pdf.set_xy(x_pos, y)
-            pdf.set_text_color(200, 50, 50)
-            pdf.set_text_shaping(use_shaping_engine=True, features={tag: True})
-            pdf.cell(width, ROW_HEIGHT, sub.input_chars, align="C")
-        else:
-            # Normal rendering
-            pdf.set_text_color(0)
-            pdf.set_text_shaping(use_shaping_engine=shaping, features={tag: shaping})
-            pdf.cell(width, ROW_HEIGHT, sub.input_chars, align="C")
-
         if shaping:
+            # Render diff bitmap
+            diff_img = comparator.get_diff_image(sub.input_chars, tag, sub.languages)
+            # Center image in cell width, keep height proportional to ROW_HEIGHT
+            img_h = ROW_HEIGHT - 2
+            img_w = (diff_img.width / diff_img.height) * img_h
+            # Constrain width if too large
+            if img_w > width - 2:
+                img_w = width - 2
+                img_h = (diff_img.height / diff_img.width) * img_w
+
+            # Place image slightly above the baseline or center
+            pdf.image(
+                diff_img, x=x_pos + (width - img_w) / 2, y=y + 1, w=img_w, h=img_h
+            )
+
+            if sub.difference < DIFF_THRESHOLD_SMALL:
+                # Subtle difference overlay: off (light gray) + on (red)
+                pdf.set_text_color(220)
+                pdf.set_text_shaping(use_shaping_engine=False)
+                pdf.cell(width, ROW_HEIGHT, sub.input_chars, align="C")
+
+                pdf.set_xy(x_pos, y)
+                pdf.set_text_color(200, 50, 50)
+                pdf.set_text_shaping(use_shaping_engine=True, features={tag: True})
+                pdf.cell(width, ROW_HEIGHT, sub.input_chars, align="C")
+            else:
+                # Normal rendering
+                pdf.set_text_color(0)
+                pdf.set_text_shaping(
+                    use_shaping_engine=shaping, features={tag: shaping}
+                )
+                pdf.cell(width, ROW_HEIGHT, sub.input_chars, align="C")
+
+            # Score label
             current_y = pdf.get_y()
             pdf.set_xy(x_pos, current_y + ROW_HEIGHT - 2)
             pdf.set_font("Helvetica", "I", 4)
@@ -602,6 +678,11 @@ def _render_chunk_row(
             pdf.set_xy(x_pos + width, current_y)
             pdf.set_font("TargetFont", "", 10)
             pdf.set_text_color(0)
+        else:
+            # Off row: Normal rendering
+            pdf.set_text_color(0)
+            pdf.set_text_shaping(use_shaping_engine=False)
+            pdf.cell(width, ROW_HEIGHT, sub.input_chars, align="C")
 
         if shaping and sub.feature_tag == "locl" and sub.languages:
             _draw_locl_labels(pdf, x_pos, y, width, sub.languages, analyzer)
@@ -795,7 +876,7 @@ def render_pdf_report(
         pdf.cell(0, 10, f"Feature: {tag} ({friendly_name})", ln=True)
 
         y = pdf.get_y()
-        y = _render_compact_table(pdf, subs, tag, y, analyzer)
+        y = _render_compact_table(pdf, subs, tag, y, analyzer, comparator)
         pdf.set_y(y + 5)
 
     try:
