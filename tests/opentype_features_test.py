@@ -98,21 +98,21 @@ def test_get_figure_chars(analyzer):
     assert chr(PUA_START) not in chars
 
 
-def test_substitution_is_simple():
-    """Test the is_simple property of Substitution."""
+def test_substitution_has_one_to_one_chars():
+    """Test the has_one_to_one_chars property of Substitution."""
     # 1-to-1 mapping
     # Note: input_chars/output_chars represent the character sequences
     sub1 = Substitution("A", "A", "A.alt", "A", "salt")
-    assert sub1.is_simple
+    assert sub1.has_one_to_one_chars
 
     # Many-to-1 mapping (ligature)
     sub2 = Substitution("f f i", "ffi", "ffi.liga", "ﬁ", "liga")
-    assert not sub2.is_simple
+    assert not sub2.has_one_to_one_chars
 
     # 1-to-many mapping (multiple substitution)
     sub3 = Substitution("ffi.liga", "ﬁ", "f f i", "ffi", "ccmp")
-    assert not sub3.is_simple
+    assert not sub3.has_one_to_one_chars
 
     # PUA mapping (still 1-to-1)
     sub4 = Substitution("glyph00499", "\ue000", "glyph00499.alt", "\ue001", "salt")
-    assert sub4.is_simple
+    assert sub4.has_one_to_one_chars

@@ -24,14 +24,9 @@ PUA_START = 0xE000
 
 # PDF Layout Constants
 PAGE_BREAK_THRESHOLD = 250
-MIN_SUBS_FOR_MULTI_COLUMN = 5
-GUTTER_WIDTH = 10
 ROW_HEIGHT = 8
 PAGE_BOTTOM_MARGIN = 275
-COLUMN_NAME_WIDTH = 32
-COLUMN_RENDER_WIDTH = 13
-COLUMN_UNIT_WIDTH = COLUMN_NAME_WIDTH + COLUMN_RENDER_WIDTH
-TOTAL_UNIT_WIDTH = COLUMN_UNIT_WIDTH * 2
+COLUMN_RENDER_WIDTH = 15
 
 
 @dataclass(frozen=True)
@@ -46,8 +41,8 @@ class Substitution:
     languages: tuple[str, ...] = ()
 
     @property
-    def is_simple(self) -> bool:
-        """Check if this is a 1-to-1 mapping."""
+    def has_one_to_one_chars(self) -> bool:
+        """Check if this is a 1-to-1 character mapping."""
         return len(self.input_chars) == 1 and len(self.output_chars) == 1
 
 
@@ -361,92 +356,104 @@ class FontAnalyzer:
         return temp_path
 
 
-def _draw_unit_header(pdf: FPDF, x: float, y: float) -> None:
-    """Draw the header for a single substitution unit."""
-    pdf.set_xy(x, y)
-    pdf.set_font("Helvetica", "B", 7)
-    pdf.set_text_color(120)
-    # combined column header ('off' / 'on') for one unit
-    pdf.cell(COLUMN_UNIT_WIDTH, 6, "off", align="C")
-    pdf.cell(COLUMN_UNIT_WIDTH, 6, "on", align="C")
-    pdf.set_draw_color(220)
-    pdf.line(x, y + 6, x + TOTAL_UNIT_WIDTH, y + 6)
-
-
-def _draw_all_headers(pdf: FPDF, y: float, multi: bool) -> float:
-    """Draw headers for one or two columns of substitutions."""
-    _draw_unit_header(pdf, 10, y)
-    if multi:
-        _draw_unit_header(pdf, 10 + TOTAL_UNIT_WIDTH + GUTTER_WIDTH, y)
-    return y + ROW_HEIGHT
-
-
 def _render_compact_table(
     pdf: FPDF, subs: list[Substitution], tag: str, y: float, analyzer: FontAnalyzer
 ) -> float:
-    """Render 1-to-1 mappings in a compact horizontal table."""
-    cell_width = 13
+    """Render mappings in a compact horizontal table."""
     max_width = 190
     label_width = 15
-    chars_per_row = int((max_width - label_width) / cell_width)
 
-    for i in range(0, len(subs), chars_per_row):
-        chunk = subs[i : i + chars_per_row]
+    i = 0
+    while i < len(subs):
+        chunk, i = _get_next_sub_chunk(subs, i, max_width - label_width)
+        if not chunk:
+            break
+
         row_height = ROW_HEIGHT
-
-        # Determine extra height for locl labels
-        has_langs = any(s.feature_tag == "locl" and s.languages for s in chunk)
-        if has_langs:
+        if any(s.feature_tag == "locl" and s.languages for s, w in chunk):
             row_height += 3
 
         if y + 2 * row_height + 5 > PAGE_BOTTOM_MARGIN:
             pdf.add_page()
             y = 15
 
-        # Row 1: Off
-        pdf.set_xy(10, y)
-        pdf.set_text_color(120)
-        pdf.set_font("Helvetica", "I", 7)
-        pdf.cell(label_width, ROW_HEIGHT, "off:", align="L")
-
-        pdf.set_text_color(0)
-        pdf.set_font("TargetFont", "", 10)
-        pdf.set_text_shaping(use_shaping_engine=False)
-        for sub in chunk:
-            pdf.cell(cell_width, ROW_HEIGHT, sub.input_chars, align="C")
-
-        y += ROW_HEIGHT
-
-        # Row 2: On
-        pdf.set_xy(10, y)
-        pdf.set_text_color(120)
-        pdf.set_font("Helvetica", "I", 7)
-        pdf.cell(label_width, ROW_HEIGHT, "on:", align="L")
-
-        pdf.set_text_color(0)
-        pdf.set_font("TargetFont", "", 10)
-        pdf.set_text_shaping(use_shaping_engine=True, features={tag: True})
-        for sub in chunk:
-            x_pos = pdf.get_x()
-            pdf.cell(cell_width, ROW_HEIGHT, sub.input_chars, align="C")
-
-            # Draw language label if locl
-            if sub.feature_tag == "locl" and sub.languages:
-                current_y = pdf.get_y()
-                pdf.set_xy(x_pos, current_y + ROW_HEIGHT - 2)
-                pdf.set_font("Helvetica", "I", 4)
-                pdf.set_text_color(150)
-                langs = ",".join(
-                    analyzer.get_language_name(lang) for lang in sub.languages
-                )
-                pdf.cell(cell_width, 2, langs, align="C")
-                pdf.set_xy(x_pos + cell_width, current_y)  # Restore position
-                pdf.set_font("TargetFont", "", 10)
-                pdf.set_text_color(0)
-
-        y += ROW_HEIGHT + 4  # Padding between chunks
+        y = _render_chunk_row(pdf, chunk, "off", False, tag, y, label_width, analyzer)
+        y = _render_chunk_row(pdf, chunk, "on", True, tag, y, label_width, analyzer)
+        y += 4  # Padding between chunks
 
     return y
+
+
+def _get_next_sub_chunk(
+    subs: list[Substitution], start_index: int, available_width: float
+) -> tuple[list[tuple[Substitution, float]], int]:
+    """Calculate how many substitutions fit in the current row."""
+    chunk = []
+    current_row_width: float = 0
+    i = start_index
+    while i < len(subs):
+        sub = subs[i]
+        # Estimate width: 10 units base + 5 per extra char
+        sub_width = 10 + (max(len(sub.input_chars), len(sub.output_chars)) - 1) * 5
+        if current_row_width + sub_width > available_width:
+            if not chunk:  # Single very long sub
+                chunk.append((sub, sub_width))
+                i += 1
+            break
+        chunk.append((sub, sub_width))
+        current_row_width += sub_width
+        i += 1
+    return chunk, i
+
+
+def _render_chunk_row(
+    pdf: FPDF,
+    chunk: list[tuple[Substitution, float]],
+    label: str,
+    shaping: bool,
+    tag: str,
+    y: float,
+    label_width: float,
+    analyzer: FontAnalyzer,
+) -> float:
+    """Render a single row (off or on) for a chunk of substitutions."""
+    pdf.set_xy(10, y)
+    pdf.set_text_color(120)
+    pdf.set_font("Helvetica", "I", 7)
+    pdf.cell(label_width, ROW_HEIGHT, f"{label}:", align="L")
+
+    pdf.set_text_color(0)
+    pdf.set_font("TargetFont", "", 10)
+    pdf.set_text_shaping(use_shaping_engine=shaping, features={tag: shaping})
+
+    for sub, width in chunk:
+        x_pos = pdf.get_x()
+        pdf.cell(width, ROW_HEIGHT, sub.input_chars, align="C")
+
+        if shaping and sub.feature_tag == "locl" and sub.languages:
+            _draw_locl_labels(pdf, x_pos, y, width, sub.languages, analyzer)
+
+    return y + ROW_HEIGHT
+
+
+def _draw_locl_labels(
+    pdf: FPDF,
+    x: float,
+    y: float,
+    width: float,
+    languages: tuple[str, ...],
+    analyzer: FontAnalyzer,
+) -> None:
+    """Draw small language labels below localized substitutions."""
+    pdf.set_xy(x, y + ROW_HEIGHT - 2)
+    pdf.set_font("Helvetica", "I", 4)
+    pdf.set_text_color(150)
+    langs = ",".join(analyzer.get_language_name(lang) for lang in languages)
+    pdf.cell(width, 2, langs, align="C")
+    # Position will be restored by the caller if needed, but we mostly care about text flow
+    pdf.set_xy(x + width, y)
+    pdf.set_font("TargetFont", "", 10)
+    pdf.set_text_color(0)
 
 
 def _render_figures_section(
@@ -504,35 +511,6 @@ def _render_figures_section(
     return y + 5
 
 
-def _render_substitution_unit(
-    pdf: FPDF, x: float, y: float, sub: Substitution, analyzer: FontAnalyzer
-) -> None:
-    """Render a single substitution unit (input, off, on, output)."""
-    pdf.set_xy(x, y)
-    pdf.set_text_color(0)
-
-    pdf.set_font("Helvetica", "", 7)
-    pdf.cell(COLUMN_NAME_WIDTH, ROW_HEIGHT, sub.input_glyphs, align="L")
-
-    pdf.set_font("TargetFont", "", 10)
-    pdf.set_text_shaping(use_shaping_engine=False)
-    pdf.cell(COLUMN_RENDER_WIDTH, ROW_HEIGHT, sub.input_chars, align="C")
-
-    pdf.set_text_shaping(use_shaping_engine=True, features={sub.feature_tag: True})
-    pdf.cell(COLUMN_RENDER_WIDTH, ROW_HEIGHT, sub.input_chars, align="C")
-
-    pdf.set_text_shaping(use_shaping_engine=False)
-    pdf.set_font("Helvetica", "", 7)
-    pdf.cell(COLUMN_NAME_WIDTH, ROW_HEIGHT, sub.output_glyphs, align="R")
-
-    if sub.feature_tag == "locl" and sub.languages:
-        pdf.set_font("Helvetica", "I", 5)
-        pdf.set_text_color(150)
-        langs = ", ".join(analyzer.get_language_name(lang) for lang in sub.languages)
-        pdf.set_xy(x, y + ROW_HEIGHT - 2)
-        pdf.cell(TOTAL_UNIT_WIDTH, 2, langs, align="R")
-
-
 def render_pdf_report(
     analyzer: FontAnalyzer,
     output_path: Path,
@@ -575,37 +553,8 @@ def render_pdf_report(
         pdf.set_text_color(0)
         pdf.cell(0, 10, f"Feature: {tag} ({friendly_name})", ln=True)
 
-        simple_subs = [s for s in subs if s.is_simple]
-        complex_subs = [s for s in subs if not s.is_simple]
-
         y = pdf.get_y()
-
-        if simple_subs:
-            y = _render_compact_table(pdf, simple_subs, tag, y, analyzer)
-
-        if complex_subs:
-            multi = len(complex_subs) > MIN_SUBS_FOR_MULTI_COLUMN
-            y = _draw_all_headers(pdf, y, multi)
-
-            for i in range(0, len(complex_subs), 2):
-                if y + ROW_HEIGHT > PAGE_BOTTOM_MARGIN:
-                    pdf.add_page()
-                    y = 15
-                    y = _draw_all_headers(pdf, y, multi)
-
-                _render_substitution_unit(pdf, 10, y, complex_subs[i], analyzer)
-
-                if i + 1 < len(complex_subs):
-                    _render_substitution_unit(
-                        pdf,
-                        10 + TOTAL_UNIT_WIDTH + GUTTER_WIDTH,
-                        y,
-                        complex_subs[i + 1],
-                        analyzer,
-                    )
-
-                y += ROW_HEIGHT
-
+        y = _render_compact_table(pdf, subs, tag, y, analyzer)
         pdf.set_y(y + 5)
 
     try:
