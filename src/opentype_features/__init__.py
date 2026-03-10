@@ -64,6 +64,8 @@ class FontAnalyzer:
 
     def _build_reverse_cmap(self) -> dict[str, int]:
         cmap = self.font.getBestCmap()
+        if cmap is None:
+            return {}
         return {v: k for k, v in cmap.items()}
 
     def get_tag_name(self, tag: str) -> str:
