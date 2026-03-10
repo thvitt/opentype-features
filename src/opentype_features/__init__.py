@@ -10,7 +10,7 @@ from typing import Any
 from fontTools.ttLib import TTFont
 from fpdf import FPDF
 
-from opentype_features.feature_names import FEATURE_NAMES
+from opentype_features.feature_names import FEATURE_NAMES, LANGUAGE_NAMES
 
 # GSUB Lookup Types
 LOOKUP_TYPE_SINGLE = 1
@@ -43,6 +43,7 @@ class Substitution:
     output_glyphs: str
     output_chars: str
     feature_tag: str
+    languages: tuple[str, ...] = ()
 
     @property
     def is_simple(self) -> bool:
@@ -76,6 +77,14 @@ class FontAnalyzer:
     def get_tag_name(self, tag: str) -> str:
         """Return the friendly name for an OpenType feature tag."""
         return FEATURE_NAMES.get(tag, tag)
+
+    def get_language_name(self, lang_tag: str) -> str:
+        """Return the friendly name for an OpenType language tag."""
+        # Handle tags like "latn/TRK"
+        tag = lang_tag
+        if "/" in lang_tag:
+            _script, tag = lang_tag.split("/")
+        return LANGUAGE_NAMES.get(tag, tag)
 
     def get_glyph_info(self, glyph_name: str) -> tuple[str, str]:
         """Return the character and glyph name for a given glyph name."""
@@ -129,39 +138,87 @@ class FontAnalyzer:
 
         return "".join(fig_chars) + "".join(sorted(extra_chars))
 
+    def _get_feature_lookup_contexts(
+        self,
+        script_list: list[Any],
+        feature_list: list[Any],
+    ) -> dict[tuple[str, int], set[str]]:
+        """Map (feature_tag, lookup_index) to set of (script, lang) contexts."""
+        contexts: dict[tuple[str, int], set[str]] = {}
+        for script_record in script_list:
+            script_tag = script_record.ScriptTag
+            script = script_record.Script
+
+            lang_systems = []
+            if script.DefaultLangSys:
+                lang_systems.append(("dflt", script.DefaultLangSys))
+            for lang_sys_record in script.LangSysRecord:
+                lang_systems.append(
+                    (lang_sys_record.LangSysTag, lang_sys_record.LangSys)
+                )
+
+            for lang_tag, lang_sys in lang_systems:
+                for feature_index in lang_sys.FeatureIndex:
+                    feature_record = feature_list[feature_index]
+                    tag = feature_record.FeatureTag
+                    for lookup_index in feature_record.Feature.LookupListIndex:
+                        key = (tag, lookup_index)
+                        if key not in contexts:
+                            contexts[key] = set()
+                        contexts[key].add(f"{script_tag}/{lang_tag}")
+        return contexts
+
     def analyze(self) -> None:
         """Analyze the font's GSUB table."""
         if "GSUB" not in self.font:
             return
 
         gsub = self.font["GSUB"].table
-        feature_list = gsub.FeatureList.FeatureRecord
         lookup_list = gsub.LookupList.Lookup
 
-        for feature_record in feature_list:
-            tag = feature_record.FeatureTag
-            if tag not in self.feature_substitutions:
-                self.feature_substitutions[tag] = []
+        # (feature_tag, lookup_index) -> set of (script, lang)
+        feature_lookup_contexts = self._get_feature_lookup_contexts(
+            gsub.ScriptList.ScriptRecord, gsub.FeatureList.FeatureRecord
+        )
 
-            for lookup_index in feature_record.Feature.LookupListIndex:
-                if lookup_index < len(lookup_list):
-                    lookup = lookup_list[lookup_index]
-                    self.feature_substitutions[tag].extend(
-                        self._process_lookup(lookup, tag)
-                    )
+        # Collect and combine substitutions
+        # (tag, in_chars, out_chars) -> Substitution
+        result_map: dict[tuple[str, str, str], Substitution] = {}
 
-        # Deduplicate and filter empty features
-        cleaned_subs = {}
-        for tag, subs in self.feature_substitutions.items():
-            unique_subs = []
-            seen = set()
-            for sub in subs:
-                if sub not in seen:
-                    unique_subs.append(sub)
-                    seen.add(sub)
-            if unique_subs:
-                cleaned_subs[tag] = unique_subs
-        self.feature_substitutions = cleaned_subs
+        for (tag, lookup_index), contexts in feature_lookup_contexts.items():
+            if lookup_index < len(lookup_list):
+                lookup = lookup_list[lookup_index]
+                lookup_subs = self._process_lookup(lookup, tag)
+                languages = tuple(sorted(contexts))
+                for sub in lookup_subs:
+                    key = (sub.feature_tag, sub.input_chars, sub.output_chars)
+                    if key not in result_map:
+                        result_map[key] = Substitution(
+                            input_glyphs=sub.input_glyphs,
+                            input_chars=sub.input_chars,
+                            output_glyphs=sub.output_glyphs,
+                            output_chars=sub.output_chars,
+                            feature_tag=sub.feature_tag,
+                            languages=languages,
+                        )
+                    else:
+                        existing = result_map[key]
+                        new_langs = tuple(sorted(set(existing.languages + languages)))
+                        result_map[key] = Substitution(
+                            input_glyphs=existing.input_glyphs,
+                            input_chars=existing.input_chars,
+                            output_glyphs=existing.output_glyphs,
+                            output_chars=existing.output_chars,
+                            feature_tag=existing.feature_tag,
+                            languages=new_langs,
+                        )
+
+        # Populate self.feature_substitutions
+        self.feature_substitutions = {}
+        for sub in result_map.values():
+            if sub.feature_tag not in self.feature_substitutions:
+                self.feature_substitutions[sub.feature_tag] = []
+            self.feature_substitutions[sub.feature_tag].append(sub)
 
     def _process_lookup(self, lookup: Any, tag: str) -> list[Substitution]:  # noqa: ANN401
         substitutions = []
@@ -325,7 +382,7 @@ def _draw_all_headers(pdf: FPDF, y: float, multi: bool) -> float:
 
 
 def _render_compact_table(
-    pdf: FPDF, subs: list[Substitution], tag: str, y: float
+    pdf: FPDF, subs: list[Substitution], tag: str, y: float, analyzer: FontAnalyzer
 ) -> float:
     """Render 1-to-1 mappings in a compact horizontal table."""
     cell_width = 13
@@ -334,11 +391,17 @@ def _render_compact_table(
     chars_per_row = int((max_width - label_width) / cell_width)
 
     for i in range(0, len(subs), chars_per_row):
-        if y + 2 * ROW_HEIGHT + 5 > PAGE_BOTTOM_MARGIN:
+        chunk = subs[i : i + chars_per_row]
+        row_height = ROW_HEIGHT
+
+        # Determine extra height for locl labels
+        has_langs = any(s.feature_tag == "locl" and s.languages for s in chunk)
+        if has_langs:
+            row_height += 3
+
+        if y + 2 * row_height + 5 > PAGE_BOTTOM_MARGIN:
             pdf.add_page()
             y = 15
-
-        chunk = subs[i : i + chars_per_row]
 
         # Row 1: Off
         pdf.set_xy(10, y)
@@ -364,7 +427,22 @@ def _render_compact_table(
         pdf.set_font("TargetFont", "", 10)
         pdf.set_text_shaping(use_shaping_engine=True, features={tag: True})
         for sub in chunk:
+            x_pos = pdf.get_x()
             pdf.cell(cell_width, ROW_HEIGHT, sub.input_chars, align="C")
+
+            # Draw language label if locl
+            if sub.feature_tag == "locl" and sub.languages:
+                current_y = pdf.get_y()
+                pdf.set_xy(x_pos, current_y + ROW_HEIGHT - 2)
+                pdf.set_font("Helvetica", "I", 4)
+                pdf.set_text_color(150)
+                langs = ",".join(
+                    analyzer.get_language_name(lang) for lang in sub.languages
+                )
+                pdf.cell(cell_width, 2, langs, align="C")
+                pdf.set_xy(x_pos + cell_width, current_y)  # Restore position
+                pdf.set_font("TargetFont", "", 10)
+                pdf.set_text_color(0)
 
         y += ROW_HEIGHT + 4  # Padding between chunks
 
@@ -426,7 +504,9 @@ def _render_figures_section(
     return y + 5
 
 
-def _render_substitution_unit(pdf: FPDF, x: float, y: float, sub: Substitution) -> None:
+def _render_substitution_unit(
+    pdf: FPDF, x: float, y: float, sub: Substitution, analyzer: FontAnalyzer
+) -> None:
     """Render a single substitution unit (input, off, on, output)."""
     pdf.set_xy(x, y)
     pdf.set_text_color(0)
@@ -444,6 +524,13 @@ def _render_substitution_unit(pdf: FPDF, x: float, y: float, sub: Substitution) 
     pdf.set_text_shaping(use_shaping_engine=False)
     pdf.set_font("Helvetica", "", 7)
     pdf.cell(COLUMN_NAME_WIDTH, ROW_HEIGHT, sub.output_glyphs, align="R")
+
+    if sub.feature_tag == "locl" and sub.languages:
+        pdf.set_font("Helvetica", "I", 5)
+        pdf.set_text_color(150)
+        langs = ", ".join(analyzer.get_language_name(lang) for lang in sub.languages)
+        pdf.set_xy(x, y + ROW_HEIGHT - 2)
+        pdf.cell(TOTAL_UNIT_WIDTH, 2, langs, align="R")
 
 
 def render_pdf_report(
@@ -494,7 +581,7 @@ def render_pdf_report(
         y = pdf.get_y()
 
         if simple_subs:
-            y = _render_compact_table(pdf, simple_subs, tag, y)
+            y = _render_compact_table(pdf, simple_subs, tag, y, analyzer)
 
         if complex_subs:
             multi = len(complex_subs) > MIN_SUBS_FOR_MULTI_COLUMN
@@ -506,7 +593,7 @@ def render_pdf_report(
                     y = 15
                     y = _draw_all_headers(pdf, y, multi)
 
-                _render_substitution_unit(pdf, 10, y, complex_subs[i])
+                _render_substitution_unit(pdf, 10, y, complex_subs[i], analyzer)
 
                 if i + 1 < len(complex_subs):
                     _render_substitution_unit(
@@ -514,6 +601,7 @@ def render_pdf_report(
                         10 + TOTAL_UNIT_WIDTH + GUTTER_WIDTH,
                         y,
                         complex_subs[i + 1],
+                        analyzer,
                     )
 
                 y += ROW_HEIGHT
