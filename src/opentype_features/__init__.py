@@ -286,6 +286,7 @@ class FontAnalyzer:
         self.reverse_cmap = self._build_reverse_cmap()
         self.pua_map: dict[str, str] = {}
         self.feature_substitutions: dict[str, list[Substitution]] = {}
+        self.custom_feature_names: dict[str, str] = self._get_feature_name_map()
 
     def _build_reverse_cmap(self) -> dict[str, int]:
         cmap = self.font.getBestCmap()
@@ -293,9 +294,41 @@ class FontAnalyzer:
             return {}
         return {v: k for k, v in cmap.items()}
 
+    def _get_feature_name_map(self) -> dict[str, str]:
+        """Extract custom feature names from the GSUB table parameters."""
+        name_map = {}
+        if "GSUB" not in self.font:
+            return name_map
+
+        gsub = self.font["GSUB"].table
+        if not hasattr(gsub, "FeatureList") or not gsub.FeatureList:
+            return name_map
+
+        for feature_record in gsub.FeatureList.FeatureRecord:
+            tag = feature_record.FeatureTag
+            params = feature_record.Feature.FeatureParams
+            if params and hasattr(params, "UINameID"):
+                name_id = params.UINameID
+                # Try Windows English, then Mac English
+                name_rec = self.font["name"].getName(name_id, 3, 1, 0x409)
+                if not name_rec:
+                    name_rec = self.font["name"].getName(name_id, 1, 0, 0)
+
+                # Fallback: search all names for this ID
+                if not name_rec:
+                    for record in self.font["name"].names:
+                        if record.nameID == name_id:
+                            name_rec = record
+                            break
+
+                if name_rec:
+                    name_map[tag] = name_rec.toUnicode()
+
+        return name_map
+
     def get_tag_name(self, tag: str) -> str:
         """Return the friendly name for an OpenType feature tag."""
-        return FEATURE_NAMES.get(tag, tag)
+        return self.custom_feature_names.get(tag, FEATURE_NAMES.get(tag, tag))
 
     def get_language_name(self, lang_tag: str) -> str:
         """Return the friendly name for an OpenType language tag."""
