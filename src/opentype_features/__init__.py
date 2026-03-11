@@ -8,6 +8,7 @@ from pathlib import Path
 
 import numpy as np
 import uharfbuzz as hb
+from fontFeatures import Chaining
 from fontFeatures import Substitution as FFSubstitution
 from fontFeatures.ttLib import unparse
 from fontTools.ttLib import TTFont
@@ -363,50 +364,127 @@ class FontAnalyzer:
 
                 for rule in routine.rules:
                     if isinstance(rule, FFSubstitution):
-                        # For now, simplify by taking the first glyph of any class
-                        in_glyphs = [g[0] for g in rule.input]
-                        out_glyphs = [g[0] for g in rule.replacement]
-
-                        in_chars = "".join(self.get_glyph_info(g)[0] for g in in_glyphs)
-                        out_chars = "".join(
-                            self.get_glyph_info(g)[0] for g in out_glyphs
-                        )
-
-                        display_in = " ".join(
-                            self.get_display_name(g) for g in in_glyphs
-                        )
-                        display_out = " ".join(
-                            self.get_display_name(g) for g in out_glyphs
-                        )
-
-                        key = (tag, in_chars, out_chars)
-                        if key not in result_map:
-                            result_map[key] = Substitution(
-                                input_glyphs=display_in,
-                                input_chars=in_chars,
-                                output_glyphs=display_out,
-                                output_chars=out_chars,
-                                feature_tag=tag,
-                                languages=langs,
-                            )
-                        else:
-                            # Combine languages
-                            existing = result_map[key]
-                            new_langs = tuple(sorted(set(existing.languages + langs)))
-                            result_map[key] = Substitution(
-                                input_glyphs=existing.input_glyphs,
-                                input_chars=existing.input_chars,
-                                output_glyphs=existing.output_glyphs,
-                                output_chars=existing.output_chars,
-                                feature_tag=existing.feature_tag,
-                                languages=new_langs,
-                            )
+                        self._process_ff_substitution(rule, tag, langs, result_map)
+                    elif isinstance(rule, Chaining):
+                        self._process_ff_chaining(rule, tag, langs, result_map)
 
         self.feature_substitutions = {}
         for sub in result_map.values():
             if sub.feature_tag not in self.feature_substitutions:
                 self.feature_substitutions[sub.feature_tag] = []
             self.feature_substitutions[sub.feature_tag].append(sub)
+
+    def _process_ff_substitution(
+        self,
+        rule: FFSubstitution,
+        tag: str,
+        langs: tuple[str, ...],
+        result_map: dict[tuple[str, str, str], Substitution],
+    ) -> None:
+        """Process a standard fontFeatures Substitution rule."""
+        # For now, simplify by taking the first glyph of any class
+        in_glyphs = [g[0] for g in rule.input]
+        out_glyphs = [g[0] for g in rule.replacement]
+
+        in_chars = "".join(self.get_glyph_info(g)[0] for g in in_glyphs)
+        out_chars = "".join(self.get_glyph_info(g)[0] for g in out_glyphs)
+
+        display_in = " ".join(self.get_display_name(g) for g in in_glyphs)
+        display_out = " ".join(self.get_display_name(g) for g in out_glyphs)
+
+        self._add_to_result_map(
+            tag, in_chars, out_chars, display_in, display_out, langs, result_map
+        )
+
+    def _process_ff_chaining(
+        self,
+        rule: Chaining,
+        tag: str,
+        langs: tuple[str, ...],
+        result_map: dict[tuple[str, str, str], Substitution],
+    ) -> None:
+        """Process a fontFeatures Chaining rule."""
+        # A chaining rule has precontext, input, and postcontext
+        # The 'input' is what gets substituted by lookups
+        in_seq = [g[0] for g in rule.input]
+        pre_seq = [g[0] for g in rule.precontext]
+        post_seq = [g[0] for g in rule.postcontext]
+
+        out_seq = list(in_seq)
+        changed = False
+
+        for i, lookups in enumerate(rule.lookups):
+            if not lookups:
+                continue
+            for lookup in lookups:
+                actual_routine = (
+                    lookup.routine if hasattr(lookup, "routine") else lookup
+                )
+                # Try to find a rule in the lookup that applies to this position
+                for sub_rule in actual_routine.rules:
+                    # Simple check: does the input of the sub_rule match our current glyph?
+                    # (Classes are simplified to first glyph)
+                    if (
+                        isinstance(sub_rule, FFSubstitution)
+                        and sub_rule.input[0][0] == in_seq[i]
+                    ):
+                        out_seq[i] = sub_rule.replacement[0][0]
+                        changed = True
+                        break
+                if changed:
+                    break
+
+        if changed:
+            # We show the whole sequence (pre + in + post)
+            full_in_glyphs = pre_seq + in_seq + post_seq
+            full_out_glyphs = pre_seq + out_seq + post_seq
+
+            # Skip if no actual change occurred in the full sequence
+            if full_in_glyphs == full_out_glyphs:
+                return
+
+            in_chars = "".join(self.get_glyph_info(g)[0] for g in full_in_glyphs)
+            out_chars = "".join(self.get_glyph_info(g)[0] for g in full_out_glyphs)
+
+            display_in = " ".join(self.get_display_name(g) for g in full_in_glyphs)
+            display_out = " ".join(self.get_display_name(g) for g in full_out_glyphs)
+
+            self._add_to_result_map(
+                tag, in_chars, out_chars, display_in, display_out, langs, result_map
+            )
+
+    def _add_to_result_map(
+        self,
+        tag: str,
+        in_chars: str,
+        out_chars: str,
+        display_in: str,
+        display_out: str,
+        langs: tuple[str, ...],
+        result_map: dict[tuple[str, str, str], Substitution],
+    ) -> None:
+        """Add or combine a substitution in the result map."""
+        key = (tag, in_chars, out_chars)
+        if key not in result_map:
+            result_map[key] = Substitution(
+                input_glyphs=display_in,
+                input_chars=in_chars,
+                output_glyphs=display_out,
+                output_chars=out_chars,
+                feature_tag=tag,
+                languages=langs,
+            )
+        else:
+            existing = result_map[key]
+            new_langs = tuple(sorted(set(existing.languages + langs)))
+            result_map[key] = Substitution(
+                input_glyphs=existing.input_glyphs,
+                input_chars=existing.input_chars,
+                output_glyphs=existing.output_glyphs,
+                output_chars=existing.output_chars,
+                feature_tag=existing.feature_tag,
+                languages=new_langs,
+            )
 
     def create_modified_font(self) -> Path:
         """Create a temporary font file with unmapped glyphs added to the cmap."""
