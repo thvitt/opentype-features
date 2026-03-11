@@ -5,22 +5,16 @@ import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 import uharfbuzz as hb
+from fontFeatures import Substitution as FFSubstitution
+from fontFeatures.ttLib import unparse
 from fontTools.ttLib import TTFont
 from fpdf import FPDF
 from PIL import Image, ImageDraw, ImageFont
 
 from opentype_features.feature_names import FEATURE_NAMES, LANGUAGE_NAMES
-
-# GSUB Lookup Types
-LOOKUP_TYPE_SINGLE = 1
-LOOKUP_TYPE_MULTIPLE = 2
-LOOKUP_TYPE_ALTERNATE = 3
-LOOKUP_TYPE_LIGATURE = 4
-LOOKUP_TYPE_EXTENSION = 7
 
 # Private Use Area for rendering unmapped glyphs
 # Use Supplementary Private Use Area-A to avoid 0xFFFF boundary
@@ -331,17 +325,8 @@ class FontAnalyzer:
         return glyph_name
 
     def get_supported_features(self) -> set[str]:
-        """Return all feature tags supported by the font (GSUB and GPOS)."""
-        tags = set()
-        for table_tag in ["GSUB", "GPOS"]:
-            if table_tag in self.font:
-                table_obj = self.font[table_tag]
-                if hasattr(table_obj, "table"):
-                    table = table_obj.table
-                    if hasattr(table, "FeatureList") and table.FeatureList:
-                        for record in table.FeatureList.FeatureRecord:
-                            tags.add(record.FeatureTag)
-        return tags
+        """Return all feature tags supported by the font."""
+        return set(self.feature_substitutions.keys())
 
     def get_figure_chars(self) -> str:
         """Return a string of all characters involved in figure substitutions."""
@@ -362,211 +347,66 @@ class FontAnalyzer:
 
         return "".join(fig_chars) + "".join(sorted(extra_chars))
 
-    def _get_feature_lookup_contexts(
-        self,
-        script_list: list[Any],
-        feature_list: list[Any],
-    ) -> dict[tuple[str, int], set[str]]:
-        """Map (feature_tag, lookup_index) to set of (script, lang) contexts."""
-        contexts: dict[tuple[str, int], set[str]] = {}
-        for script_record in script_list:
-            script_tag = script_record.ScriptTag
-            script = script_record.Script
-
-            lang_systems = []
-            if script.DefaultLangSys:
-                lang_systems.append(("dflt", script.DefaultLangSys))
-            for lang_sys_record in script.LangSysRecord:
-                lang_systems.append(
-                    (lang_sys_record.LangSysTag, lang_sys_record.LangSys)
-                )
-
-            for lang_tag, lang_sys in lang_systems:
-                for feature_index in lang_sys.FeatureIndex:
-                    feature_record = feature_list[feature_index]
-                    tag = feature_record.FeatureTag
-                    for lookup_index in feature_record.Feature.LookupListIndex:
-                        key = (tag, lookup_index)
-                        if key not in contexts:
-                            contexts[key] = set()
-                        contexts[key].add(f"{script_tag}/{lang_tag}")
-        return contexts
-
     def analyze(self) -> None:
-        """Analyze the font's GSUB table."""
-        if "GSUB" not in self.font:
-            return
+        """Analyze the font's features using fontFeatures."""
+        ff = unparse(self.font)
 
-        gsub = self.font["GSUB"].table
-        lookup_list = gsub.LookupList.Lookup
-
-        # (feature_tag, lookup_index) -> set of (script, lang)
-        feature_lookup_contexts = self._get_feature_lookup_contexts(
-            gsub.ScriptList.ScriptRecord, gsub.FeatureList.FeatureRecord
-        )
-
-        # Collect and combine substitutions
         # (tag, in_chars, out_chars) -> Substitution
         result_map: dict[tuple[str, str, str], Substitution] = {}
 
-        for (tag, lookup_index), contexts in feature_lookup_contexts.items():
-            if lookup_index < len(lookup_list):
-                lookup = lookup_list[lookup_index]
-                lookup_subs = self._process_lookup(lookup, tag)
-                languages = tuple(sorted(contexts))
-                for sub in lookup_subs:
-                    key = (sub.feature_tag, sub.input_chars, sub.output_chars)
-                    if key not in result_map:
-                        result_map[key] = Substitution(
-                            input_glyphs=sub.input_glyphs,
-                            input_chars=sub.input_chars,
-                            output_glyphs=sub.output_glyphs,
-                            output_chars=sub.output_chars,
-                            feature_tag=sub.feature_tag,
-                            languages=languages,
-                        )
-                    else:
-                        existing = result_map[key]
-                        new_langs = tuple(sorted(set(existing.languages + languages)))
-                        result_map[key] = Substitution(
-                            input_glyphs=existing.input_glyphs,
-                            input_chars=existing.input_chars,
-                            output_glyphs=existing.output_glyphs,
-                            output_chars=existing.output_chars,
-                            feature_tag=existing.feature_tag,
-                            languages=new_langs,
+        for tag, routine_refs in ff.features.items():
+            for ref in routine_refs:
+                routine = ref.routine
+                langs = tuple(
+                    sorted(f"{script}/{lang}" for script, lang in routine.languages)
+                )
+
+                for rule in routine.rules:
+                    if isinstance(rule, FFSubstitution):
+                        # For now, simplify by taking the first glyph of any class
+                        in_glyphs = [g[0] for g in rule.input]
+                        out_glyphs = [g[0] for g in rule.replacement]
+
+                        in_chars = "".join(self.get_glyph_info(g)[0] for g in in_glyphs)
+                        out_chars = "".join(
+                            self.get_glyph_info(g)[0] for g in out_glyphs
                         )
 
-        # Populate self.feature_substitutions
+                        display_in = " ".join(
+                            self.get_display_name(g) for g in in_glyphs
+                        )
+                        display_out = " ".join(
+                            self.get_display_name(g) for g in out_glyphs
+                        )
+
+                        key = (tag, in_chars, out_chars)
+                        if key not in result_map:
+                            result_map[key] = Substitution(
+                                input_glyphs=display_in,
+                                input_chars=in_chars,
+                                output_glyphs=display_out,
+                                output_chars=out_chars,
+                                feature_tag=tag,
+                                languages=langs,
+                            )
+                        else:
+                            # Combine languages
+                            existing = result_map[key]
+                            new_langs = tuple(sorted(set(existing.languages + langs)))
+                            result_map[key] = Substitution(
+                                input_glyphs=existing.input_glyphs,
+                                input_chars=existing.input_chars,
+                                output_glyphs=existing.output_glyphs,
+                                output_chars=existing.output_chars,
+                                feature_tag=existing.feature_tag,
+                                languages=new_langs,
+                            )
+
         self.feature_substitutions = {}
         for sub in result_map.values():
             if sub.feature_tag not in self.feature_substitutions:
                 self.feature_substitutions[sub.feature_tag] = []
             self.feature_substitutions[sub.feature_tag].append(sub)
-
-    def _process_lookup(self, lookup: Any, tag: str) -> list[Substitution]:  # noqa: ANN401
-        substitutions = []
-        if lookup.LookupType == LOOKUP_TYPE_EXTENSION:
-            for subtable in lookup.SubTable:
-                substitutions.extend(
-                    self._process_subtable(
-                        subtable.ExtensionLookupType, subtable.ExtSubTable, tag
-                    )
-                )
-        else:
-            for subtable in lookup.SubTable:
-                substitutions.extend(
-                    self._process_subtable(lookup.LookupType, subtable, tag)
-                )
-        return substitutions
-
-    def _process_subtable(
-        self,
-        lookup_type: int,
-        subtable: Any,  # noqa: ANN401
-        tag: str,
-    ) -> list[Substitution]:
-        if lookup_type == LOOKUP_TYPE_SINGLE:
-            return self._process_single_subtable(subtable, tag)
-        if lookup_type == LOOKUP_TYPE_MULTIPLE:
-            return self._process_multiple_subtable(subtable, tag)
-        if lookup_type == LOOKUP_TYPE_LIGATURE:
-            return self._process_ligature_subtable(subtable, tag)
-        if lookup_type == LOOKUP_TYPE_ALTERNATE:
-            return self._process_alternate_subtable(subtable, tag)
-        return []
-
-    def _process_single_subtable(
-        self,
-        subtable: Any,  # noqa: ANN401
-        tag: str,
-    ) -> list[Substitution]:
-        substitutions = []
-        if hasattr(subtable, "mapping"):
-            for input_glyph, output_glyph in subtable.mapping.items():
-                in_char, in_name = self.get_glyph_info(input_glyph)
-                out_char, out_name = self.get_glyph_info(output_glyph)
-                substitutions.append(
-                    Substitution(
-                        input_glyphs=self.get_display_name(in_name),
-                        input_chars=in_char,
-                        output_glyphs=self.get_display_name(out_name),
-                        output_chars=out_char,
-                        feature_tag=tag,
-                    )
-                )
-        return substitutions
-
-    def _process_multiple_subtable(
-        self,
-        subtable: Any,  # noqa: ANN401
-        tag: str,
-    ) -> list[Substitution]:
-        substitutions = []
-        if hasattr(subtable, "mapping"):
-            for input_glyph, output_glyphs in subtable.mapping.items():
-                in_char, in_name = self.get_glyph_info(input_glyph)
-                out_info = [self.get_glyph_info(g) for g in output_glyphs]
-                out_chars = "".join(c for c, n in out_info)
-                out_names = " ".join(self.get_display_name(n) for c, n in out_info)
-                substitutions.append(
-                    Substitution(
-                        input_glyphs=self.get_display_name(in_name),
-                        input_chars=in_char,
-                        output_glyphs=out_names,
-                        output_chars=out_chars,
-                        feature_tag=tag,
-                    )
-                )
-        return substitutions
-
-    def _process_ligature_subtable(
-        self,
-        subtable: Any,  # noqa: ANN401
-        tag: str,
-    ) -> list[Substitution]:
-        substitutions = []
-        if hasattr(subtable, "ligatures"):
-            for first_glyph, ligatures in subtable.ligatures.items():
-                for lig in ligatures:
-                    components = [first_glyph, *lig.Component]
-                    output = lig.LigGlyph
-                    comp_info = [self.get_glyph_info(c) for c in components]
-                    comp_chars = "".join(c for c, n in comp_info)
-                    comp_names = [self.get_display_name(n) for c, n in comp_info]
-                    out_char, out_name = self.get_glyph_info(output)
-                    substitutions.append(
-                        Substitution(
-                            input_glyphs=" ".join(comp_names),
-                            input_chars=comp_chars,
-                            output_glyphs=self.get_display_name(out_name),
-                            output_chars=out_char,
-                            feature_tag=tag,
-                        )
-                    )
-        return substitutions
-
-    def _process_alternate_subtable(
-        self,
-        subtable: Any,  # noqa: ANN401
-        tag: str,
-    ) -> list[Substitution]:
-        substitutions = []
-        if hasattr(subtable, "alternates"):
-            for input_glyph, alternates in subtable.alternates.items():
-                in_char, in_name = self.get_glyph_info(input_glyph)
-                # Just take the first alternate for simplicity in this report
-                out_char, out_name = self.get_glyph_info(alternates[0])
-                substitutions.append(
-                    Substitution(
-                        input_glyphs=self.get_display_name(in_name),
-                        input_chars=in_char,
-                        output_glyphs=self.get_display_name(out_name),
-                        output_chars=out_char,
-                        feature_tag=tag,
-                    )
-                )
-        return substitutions
 
     def create_modified_font(self) -> Path:
         """Create a temporary font file with unmapped glyphs added to the cmap."""
