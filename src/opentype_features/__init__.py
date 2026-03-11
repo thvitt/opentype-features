@@ -23,7 +23,8 @@ LOOKUP_TYPE_LIGATURE = 4
 LOOKUP_TYPE_EXTENSION = 7
 
 # Private Use Area for rendering unmapped glyphs
-PUA_START = 0xE000
+# Use Supplementary Private Use Area-A to avoid 0xFFFF boundary
+PUA_START = 0xF0000
 
 # PDF Layout Constants
 PAGE_BREAK_THRESHOLD = 250
@@ -573,9 +574,23 @@ class FontAnalyzer:
             return self.font_path
 
         font_copy = TTFont(str(self.font_path))
+
+        format_4 = 4
+        format_12 = 12
+        max_char_format_4 = 0xFFFF
+
+        has_format_12 = any(t.format == format_12 for t in font_copy["cmap"].tables)
+        if not has_format_12:
+            print(
+                "Warning: Font lacks a format 12 cmap. Some PUA characters may not render."
+            )
+
         for table in font_copy["cmap"].tables:
             if table.isUnicode():
                 for name, char in self.pua_map.items():
+                    # Format 4 can only handle up to 0xFFFF
+                    if table.format == format_4 and ord(char) > max_char_format_4:
+                        continue
                     table.cmap[ord(char)] = name
 
         with tempfile.NamedTemporaryFile(suffix=".ttf", delete=False) as tmp:
