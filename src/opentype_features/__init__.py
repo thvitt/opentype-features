@@ -24,7 +24,7 @@ from opentype_features.feature_names import FEATURE_NAMES, LANGUAGE_NAMES
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Iterable, Mapping
 
     from fontFeatures import Routine, Rule
 
@@ -43,6 +43,38 @@ CELL_LABEL_HEIGHT = 3
 DIFF_THRESHOLD_NONE = 0.0001  # Technical but no visual difference
 DIFF_THRESHOLD_SMALL = 0.1  # Subtle visual difference
 RENDER_CACHE_SIZE = 1024
+
+# Applied by script-specific shapers depending on the context, e.g. Arabic joining
+SHAPER_CONTEXT_FEATURES = frozenset(
+    [
+        "isol",
+        "init",
+        "medi",
+        "fina",
+        "med2",
+        "fin2",
+        "fin3",
+        "nukt",
+        "akhn",
+        "rphf",
+        "rkrf",
+        "pref",
+        "blwf",
+        "abvf",
+        "half",
+        "pstf",
+        "vatu",
+        "cjct",
+        "pres",
+        "abvs",
+        "blws",
+        "psts",
+        "haln",
+        "ljmo",
+        "vjmo",
+        "tjmo",
+    ]
+)
 
 # Default features disabled in both renderings so that their effect becomes visible
 BASELINE_FEATURES = {"liga": False, "calt": False, "kern": False}
@@ -277,28 +309,41 @@ class VisualComparator:
         buf_off = self._shape(text, off_features, language)
         buf_on = self._shape(text, on_features, language)
 
-        info_off = buf_off.glyph_infos
-        info_on = buf_on.glyph_infos
+        return not _same_shaping(buf_off, buf_on)
 
-        if len(info_off) != len(info_on):
-            return True
+    def is_applied_by_default(
+        self,
+        text: str,
+        feature_tag: str,
+        languages: tuple[str, ...] = (),
+        other_tags: Iterable[str] = (),
+    ) -> bool:
+        """
+        Check whether HarfBuzz applies the feature to text without being asked.
 
-        for i in range(len(info_off)):
-            if info_off[i].codepoint != info_on[i].codepoint:
-                return True
+        The other_tags are disabled so that they cannot take over the feature's
+        work, e.g. liga forming a ligature that clig would form as well.
+        """
+        language = shaping_language(languages)
+        others_disabled = dict.fromkeys(other_tags, False)
+        buf_default = self._shape(text, others_disabled, language)
+        buf_disabled = self._shape(
+            text, {**others_disabled, feature_tag: False}, language
+        )
+        return not _same_shaping(buf_default, buf_disabled)
 
-        pos_off = buf_off.glyph_positions
-        pos_on = buf_on.glyph_positions
-        for i in range(len(pos_off)):
-            if (
-                pos_off[i].x_advance != pos_on[i].x_advance
-                or pos_off[i].x_offset != pos_on[i].x_offset
-                or pos_off[i].y_advance != pos_on[i].y_advance
-                or pos_off[i].y_offset != pos_on[i].y_offset
-            ):
-                return True
 
-        return False
+def _same_shaping(buf_a: hb.Buffer, buf_b: hb.Buffer) -> bool:  # type: ignore
+    """Check whether two shaped buffers contain the same glyphs at the same positions."""
+    glyphs_a = [info.codepoint for info in buf_a.glyph_infos]
+    glyphs_b = [info.codepoint for info in buf_b.glyph_infos]
+    positions_a = [_position_tuple(pos) for pos in buf_a.glyph_positions]
+    positions_b = [_position_tuple(pos) for pos in buf_b.glyph_positions]
+    return glyphs_a == glyphs_b and positions_a == positions_b
+
+
+def _position_tuple(pos: hb.GlyphPosition) -> tuple[int, int, int, int]:  # type: ignore
+    return pos.x_advance, pos.y_advance, pos.x_offset, pos.y_offset
 
 
 class FontAnalyzer:
@@ -314,6 +359,8 @@ class FontAnalyzer:
         self.custom_feature_names: dict[str, str] = {}
         self.variant_names: dict[str, list[str]] = {}
         self.tags_with_alternates: set[str] = set()
+        self.default_features: set[str] = set()
+        self.contextual_default_features: set[str] = set()
         self._read_feature_params()
 
     def _build_reverse_cmap(self) -> dict[str, int]:
@@ -366,6 +413,39 @@ class FontAnalyzer:
             )
 
         return name_rec.toUnicode() if name_rec else None
+
+    def detect_default_features(self, comparator: VisualComparator) -> None:
+        """
+        Determine which features the shaper applies without being asked.
+
+        Features applied to at least half of their substitutions count as on by
+        default, others applied to some (e.g. frac around U+2044 FRACTION SLASH)
+        or applied by script-specific shapers (e.g. Arabic init/medi/fina) as on
+        by default in some contexts.
+        """
+        self.default_features = set()
+        self.contextual_default_features = set()
+        for tag, subs in self.feature_substitutions.items():
+            other_tags = self.feature_substitutions.keys() - {tag}
+            applied = sum(
+                comparator.is_applied_by_default(
+                    sub.input_chars, tag, sub.languages, other_tags
+                )
+                for sub in subs
+            )
+            if applied * 2 >= len(subs):
+                self.default_features.add(tag)
+            elif applied or tag in SHAPER_CONTEXT_FEATURES:
+                self.contextual_default_features.add(tag)
+
+    def get_feature_heading(self, tag: str) -> str:
+        """Return the tag, its friendly name, and whether it is on by default."""
+        heading = f"{tag} ({self.get_tag_name(tag)})"
+        if tag in self.default_features:
+            heading += ", on by default"
+        elif tag in self.contextual_default_features:
+            heading += ", on by default in some contexts"
+        return heading
 
     def get_tag_name(self, tag: str) -> str:
         """Return the friendly name for an OpenType feature tag."""
@@ -992,10 +1072,24 @@ def render_pdf_report(
             new_x=XPos.LMARGIN,
             new_y=YPos.NEXT,
         )
-        pdf.ln(5)
     except Exception:
         logger.exception("Could not embed %s in the PDF report", actual_font_path)
         return
+
+    pdf.set_font("Helvetica", "", 9)
+    for label, tags in [
+        ("On by default", analyzer.default_features),
+        ("On by default in some contexts", analyzer.contextual_default_features),
+    ]:
+        if tags:
+            pdf.cell(
+                0,
+                5,
+                f"{label}: {', '.join(sorted(tags))}",
+                new_x=XPos.LMARGIN,
+                new_y=YPos.NEXT,
+            )
+    pdf.ln(5)
 
     supported = analyzer.get_supported_features()
     fig_tags = {"lnum", "onum", "pnum", "tnum"}
@@ -1047,7 +1141,7 @@ def _render_feature(
         pdf.cell(
             0,
             10,
-            f"Feature: {tag} ({friendly_name})",
+            f"Feature: {analyzer.get_feature_heading(tag)}",
             new_x=XPos.LMARGIN,
             new_y=YPos.NEXT,
         )
@@ -1062,8 +1156,7 @@ def print_console_report(analyzer: FontAnalyzer) -> None:
     """Print a summary of OpenType features to the console."""
     for tag in sorted(analyzer.feature_substitutions.keys()):
         subs = analyzer.feature_substitutions[tag]
-        friendly_name = analyzer.get_tag_name(tag)
-        print(f"\nFeature: {tag} ({friendly_name})")
+        print(f"\nFeature: {analyzer.get_feature_heading(tag)}")
         for sub in subs:
             variant_label = analyzer.get_variant_label(sub)
             print(
@@ -1107,13 +1200,15 @@ def main() -> None:
         print("No OpenType features with substitutions found.")
         return
 
-    print(f"Analyzing font: {font_path}")
-    print("-" * 40)
-    print_console_report(analyzer)
+    actual_font_path = analyzer.create_modified_font()
+    try:
+        analyzer.detect_default_features(VisualComparator(actual_font_path))
 
-    if args.output:
-        actual_font_path = analyzer.create_modified_font()
-        try:
+        print(f"Analyzing font: {font_path}")
+        print("-" * 40)
+        print_console_report(analyzer)
+
+        if args.output:
             render_pdf_report(
                 analyzer,
                 Path(args.output),
@@ -1121,9 +1216,9 @@ def main() -> None:
                 show_diff=not args.no_diff,
                 min_ratio=args.min_ratio,
             )
-        finally:
-            if actual_font_path != font_path and actual_font_path.exists():
-                actual_font_path.unlink()
+    finally:
+        if actual_font_path != font_path and actual_font_path.exists():
+            actual_font_path.unlink()
 
 
 if __name__ == "__main__":

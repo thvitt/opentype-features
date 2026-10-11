@@ -358,3 +358,21 @@ def test_diff_image_reuses_scoring_renderings(test_font, monkeypatch):
 
     assert image.mode == "RGB"
     assert image.getpixel((0, 0)) == (255, 255, 255)
+
+
+def test_detect_default_features(analyzed):
+    analyzed.detect_default_features(VisualComparator(analyzed.font_path))
+
+    assert analyzed.default_features == {"calt", "clig", "liga", "locl"}
+    assert analyzed.contextual_default_features == set()
+    assert analyzed.get_feature_heading("liga") == (
+        "liga (Standard Ligatures), on by default"
+    )
+    assert analyzed.get_feature_heading("smcp") == "smcp (Small Capitals)"
+
+
+def test_feature_heading_for_contextual_defaults(analyzer):
+    analyzer.contextual_default_features = {"frac"}
+    assert analyzer.get_feature_heading("frac") == (
+        "frac (Fractions), on by default in some contexts"
+    )
