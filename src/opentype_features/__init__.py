@@ -5,6 +5,7 @@ import sys
 import tempfile
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import uharfbuzz as hb
@@ -16,6 +17,9 @@ from fpdf import FPDF
 from PIL import Image, ImageDraw, ImageFont
 
 from opentype_features.feature_names import FEATURE_NAMES, LANGUAGE_NAMES
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 # Private Use Area for rendering unmapped glyphs
 # Use Supplementary Private Use Area-A to avoid 0xFFFF boundary
@@ -172,6 +176,7 @@ class VisualComparator:
         img_on = Image.new("L", (w_large, h_large), 0)
 
         baseline = [f"-{tag}" for tag in BASELINE_FEATURES]
+        language = shaping_language(languages)
 
         # Render Off
         draw_off = ImageDraw.Draw(img_off)
@@ -180,7 +185,8 @@ class VisualComparator:
             text,
             font=self.pil_font,
             fill=255,
-            features=baseline,
+            features=[*baseline, f"-{feature_tag}"],
+            language=language,
             anchor="ls",
         )
 
@@ -192,6 +198,7 @@ class VisualComparator:
             font=self.pil_font,
             fill=255,
             features=[*baseline, f"{feature_tag}={feature_value}"],
+            language=language,
             anchor="ls",
         )
 
@@ -234,6 +241,17 @@ class VisualComparator:
 
         return img_off.crop(common_bbox), img_on.crop(common_bbox)
 
+    def _shape(
+        self, text: str, features: Mapping[str, bool | int], language: str | None
+    ) -> hb.Buffer:  # type: ignore
+        buf = hb.Buffer()  # type: ignore
+        buf.add_str(text)
+        buf.guess_segment_properties()
+        if language:
+            buf.language = language
+        hb.shape(self.font, buf, features)  # type: ignore
+        return buf
+
     def is_visually_different(
         self,
         text: str,
@@ -248,35 +266,12 @@ class VisualComparator:
             True if there's any difference in glyph IDs or positions.
 
         """
-        off_features = BASELINE_FEATURES
+        off_features = {**BASELINE_FEATURES, feature_tag: False}
         on_features = {**BASELINE_FEATURES, feature_tag: feature_value}
 
-        buf_off = hb.Buffer()  # type: ignore
-        buf_off.add_str(text)
-        buf_off.guess_segment_properties()
-        # Set language if available (use the first one for comparison)
-        if languages:
-            _script, lang = (
-                languages[0].split("/")
-                if "/" in languages[0]
-                else ("latn", languages[0])
-            )
-            buf_off.language = lang
-
-        hb.shape(self.font, buf_off, off_features)  # type: ignore
-
-        buf_on = hb.Buffer()  # type: ignore
-        buf_on.add_str(text)
-        buf_on.guess_segment_properties()
-        if languages:
-            _script, lang = (
-                languages[0].split("/")
-                if "/" in languages[0]
-                else ("latn", languages[0])
-            )
-            buf_on.language = lang
-
-        hb.shape(self.font, buf_on, on_features)  # type: ignore
+        language = shaping_language(languages)
+        buf_off = self._shape(text, off_features, language)
+        buf_on = self._shape(text, on_features, language)
 
         info_off = buf_off.glyph_infos
         info_on = buf_on.glyph_infos
@@ -452,7 +447,10 @@ class FontAnalyzer:
             for ref in routine_refs:
                 routine = ref.routine
                 langs = tuple(
-                    sorted(f"{script}/{lang}" for script, lang in routine.languages)
+                    sorted(
+                        f"{script.strip()}/{lang.strip()}"
+                        for script, lang in routine.languages
+                    )
                 )
 
                 for rule in routine.rules:
@@ -795,6 +793,7 @@ def _render_chunk_row(
                 pdf.set_text_shaping(
                     use_shaping_engine=True,
                     features={**BASELINE_FEATURES, tag: sub.feature_value},  # type: ignore[bad-argument-type]
+                    language=shaping_language(sub.languages),
                 )
                 pdf.cell(width, ROW_HEIGHT, sub.input_chars, align="C")
             else:
@@ -803,6 +802,7 @@ def _render_chunk_row(
                 pdf.set_text_shaping(
                     use_shaping_engine=True,
                     features={**BASELINE_FEATURES, tag: sub.feature_value},  # type: ignore[bad-argument-type]
+                    language=shaping_language(sub.languages),
                 )
                 pdf.cell(width, ROW_HEIGHT, sub.input_chars, align="C")
 
@@ -899,6 +899,18 @@ def _render_figures_section(
             y += 10
 
     return y + 5
+
+
+def shaping_language(languages: tuple[str, ...]) -> str | None:
+    """
+    Return a HarfBuzz language selecting the OpenType language system of a rule.
+
+    Rules that also apply to the default language need no explicit language.
+    """
+    lang_tags = [entry.rpartition("/")[2] for entry in languages]
+    if not lang_tags or "dflt" in lang_tags:
+        return None
+    return f"x-hbot{lang_tags[0]}"
 
 
 def is_character_variant(tag: str) -> bool:

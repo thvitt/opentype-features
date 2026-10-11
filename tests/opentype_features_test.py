@@ -12,6 +12,7 @@ from opentype_features import (
     get_feature_priority,
     is_character_variant,
     score_substitutions,
+    shaping_language,
 )
 
 
@@ -257,3 +258,15 @@ def test_variant_label_empty_without_alternates(analyzer):
     plain = Substitution("a", "a", "a.alt", "x", "cv02")
     assert analyzer.get_variant_label(plain) == ""
     assert analyzer.get_variant_label(Substitution("a", "a", "A", "A", "smcp")) == ""
+
+
+def test_localized_forms_are_scored_as_different(analyzed):
+    (sub,) = _scored(analyzed, "locl")
+    assert sub.languages == ("latn/TRK",)
+    assert analyzed.get_cell_label(sub) == "Turkish"
+
+
+def test_shaping_language():
+    assert shaping_language(()) is None
+    assert shaping_language(("DFLT/dflt", "latn/TRK")) is None
+    assert shaping_language(("latn/CAT", "latn/TRK")) == "x-hbotCAT"
