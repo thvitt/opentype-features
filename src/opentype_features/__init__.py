@@ -1,11 +1,10 @@
 """Analyze OpenType features in a font file and generate reports."""
 
-import argparse
+import contextlib
 import functools
 import itertools
 import logging
 import math
-import sys
 import tempfile
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -31,7 +30,7 @@ from opentype_features.feature_names import FEATURE_NAMES, LANGUAGE_NAMES
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping
+    from collections.abc import Iterable, Iterator, Mapping
 
     from fontFeatures import Routine, Rule
 
@@ -54,6 +53,8 @@ RENDER_CACHE_SIZE = 1024
 
 # Minimum number of inputs mapping to the same output to be shown as one entry
 MIN_GROUP_SIZE = 4
+
+FIGURE_TAGS = frozenset({"lnum", "onum", "pnum", "tnum"})
 
 # Positioning features such as kerning have thousands of rules, keep the strongest
 MAX_POSITIONING_EXAMPLES = 60
@@ -793,6 +794,34 @@ class FontAnalyzer:
             new_langs = tuple(sorted(set(existing.languages + langs)))
             result_map[key] = replace(existing, languages=new_langs)
 
+    @contextlib.contextmanager
+    def modified_font(self) -> Iterator[Path]:
+        """Provide a font file in which unencoded glyphs are mapped to the PUA."""
+        path = self.create_modified_font()
+        try:
+            yield path
+        finally:
+            if path != self.font_path:
+                path.unlink(missing_ok=True)
+
+    def get_font_feature_tags(self) -> set[str]:
+        """Return the tags of all GSUB and GPOS features in the font."""
+        return {
+            record.FeatureTag
+            for table_tag in ("GSUB", "GPOS")
+            if table_tag in self.font
+            and (feature_list := self.font[table_tag].table.FeatureList)  # type: ignore[missing-attribute]
+            for record in feature_list.FeatureRecord
+        }
+
+    def count_examples(self, tag: str) -> int:
+        """Return the number of examples found, including dropped positioning ones."""
+        examples = self.feature_examples.get(tag, [])
+        positioning = sum(e.positioning for e in examples)
+        return (
+            len(examples) - positioning + self.positioning_totals.get(tag, positioning)
+        )
+
     def create_modified_font(self) -> Path:
         """Create a temporary font file with unmapped glyphs added to the cmap."""
         if not self.pua_map:
@@ -1241,30 +1270,39 @@ def score_examples(
     return scored
 
 
+def collect_examples(
+    analyzer: FontAnalyzer, comparator: VisualComparator, min_ratio: float = 0.0
+) -> dict[str, list[FeatureExample]]:
+    """Return the visible examples per feature, grouped and in report order."""
+    return {
+        tag: group_examples(
+            score_examples(analyzer.feature_examples[tag], comparator, min_ratio)
+        )
+        for tag in sorted(analyzer.feature_examples, key=get_feature_priority)
+    }
+
+
 def render_pdf_report(
     analyzer: FontAnalyzer,
+    examples_by_tag: dict[str, list[FeatureExample]],
     output_path: Path,
     actual_font_path: Path,
+    comparator: VisualComparator,
     show_diff: bool = True,
-    min_ratio: float = 0.0,
 ) -> None:
-    """Generate a PDF report of OpenType features."""
+    """Write a PDF report of the examples of each feature."""
     pdf = FPDF()
     pdf.set_auto_page_break(False)
     pdf.add_page()
-    try:
-        pdf.add_font("TargetFont", style="", fname=str(actual_font_path))
-        pdf.set_font("Helvetica", "B", 16)
-        pdf.cell(
-            0,
-            10,
-            f"OpenType Feature Report: {analyzer.font_path.name}",
-            new_x=XPos.LMARGIN,
-            new_y=YPos.NEXT,
-        )
-    except Exception:
-        logger.exception("Could not embed %s in the PDF report", actual_font_path)
-        return
+    pdf.add_font("TargetFont", style="", fname=str(actual_font_path))
+    pdf.set_font("Helvetica", "B", 16)
+    pdf.cell(
+        0,
+        10,
+        f"OpenType Feature Report: {analyzer.font_path.name}",
+        new_x=XPos.LMARGIN,
+        new_y=YPos.NEXT,
+    )
 
     pdf.set_font("Helvetica", "", 9)
     for label, tags in [
@@ -1282,29 +1320,19 @@ def render_pdf_report(
     pdf.ln(5)
 
     supported = analyzer.get_supported_features()
-    fig_tags = {"lnum", "onum", "pnum", "tnum"}
-    comparator = VisualComparator(actual_font_path)
-
-    if supported & fig_tags:
+    if supported & FIGURE_TAGS:
         y = _render_figures_section(pdf, analyzer, supported)
         pdf.set_y(y)
 
-    remaining_tags = sorted(
-        [t for t in analyzer.feature_examples if t not in fig_tags],
-        key=get_feature_priority,
-    )
-
-    for tag in remaining_tags:
+    for tag, examples in examples_by_tag.items():
+        if tag in FIGURE_TAGS or not examples:
+            continue
         try:
-            _render_feature(pdf, analyzer, comparator, tag, show_diff, min_ratio)
+            _render_feature(pdf, analyzer, comparator, tag, examples, show_diff)
         except Exception:
             logger.exception("Could not render feature %s", tag)
 
-    try:
-        pdf.output(str(output_path))
-        print(f"\nPDF report saved to: {output_path}")
-    except Exception:
-        logger.exception("Could not save the PDF report to %s", output_path)
+    pdf.output(str(output_path))
 
 
 def _render_feature(
@@ -1312,133 +1340,29 @@ def _render_feature(
     analyzer: FontAnalyzer,
     comparator: VisualComparator,
     tag: str,
+    examples: list[FeatureExample],
     show_diff: bool,
-    min_ratio: float,
 ) -> None:
     """Render the section of a single feature."""
-    subs = group_examples(
-        score_examples(analyzer.feature_examples[tag], comparator, min_ratio)
+    friendly_name = analyzer.get_tag_name(tag)
+
+    # Keep the heading together with the first chunk of its table
+    first_chunk_height = _chunk_height(show_diff, has_labels=True)
+    if pdf.get_y() + HEADING_HEIGHT + first_chunk_height > PAGE_BOTTOM_MARGIN:
+        pdf.add_page()
+
+    pdf.start_section(f"{tag}: {friendly_name}", level=0)
+    pdf.set_font("Helvetica", "B", 12)
+    pdf.set_text_color(0)
+    pdf.cell(
+        0,
+        HEADING_HEIGHT,
+        f"Feature: {analyzer.get_feature_heading(tag)}",
+        new_x=XPos.LMARGIN,
+        new_y=YPos.NEXT,
     )
-    if subs:
-        friendly_name = analyzer.get_tag_name(tag)
 
-        # Keep the heading together with the first chunk of its table
-        first_chunk_height = _chunk_height(show_diff, has_labels=True)
-        if pdf.get_y() + HEADING_HEIGHT + first_chunk_height > PAGE_BOTTOM_MARGIN:
-            pdf.add_page()
-
-        pdf.start_section(f"{tag}: {friendly_name}", level=0)
-        pdf.set_font("Helvetica", "B", 12)
-        pdf.set_text_color(0)
-        pdf.cell(
-            0,
-            HEADING_HEIGHT,
-            f"Feature: {analyzer.get_feature_heading(tag)}",
-            new_x=XPos.LMARGIN,
-            new_y=YPos.NEXT,
-        )
-
-        y = _render_compact_table(
-            pdf, subs, pdf.get_y(), analyzer, comparator, show_diff=show_diff
-        )
-        pdf.set_y(y + 5)
-
-
-def print_console_report(
-    analyzer: FontAnalyzer,
-    comparator: VisualComparator | None = None,
-    min_ratio: float = 0.0,
-) -> None:
-    """
-    Print a summary of OpenType features to the console.
-
-    With a comparator, substitutions without a relative visual difference of at
-    least min_ratio are left out.
-    """
-    for tag in sorted(analyzer.feature_examples.keys()):
-        subs = analyzer.feature_examples[tag]
-        if comparator:
-            subs = score_examples(subs, comparator, min_ratio)
-            if not subs:
-                continue
-        print(f"\nFeature: {analyzer.get_feature_heading(tag)}")
-        for sub in group_examples(subs):
-            notes = [analyzer.get_variant_label(sub), sub.input_summary]
-            if sub.input_variants and sub.input_alternatives is None:
-                notes.append(
-                    "also: " + "; ".join(v.input_glyphs for v in sub.input_variants)
-                )
-            note_text = ", ".join(note for note in notes if note)
-            print(
-                f"  {sub.input_glyphs} ({sub.input_pattern}) -> "
-                f"{sub.output_glyphs} ({sub.output_chars})"
-                + (f" [{note_text}]" if note_text else "")
-            )
-
-
-def main() -> None:
-    """Execute the OpenType feature analysis tool."""
-    parser = argparse.ArgumentParser(
-        description="Analyze OpenType features in a font file."
+    y = _render_compact_table(
+        pdf, examples, pdf.get_y(), analyzer, comparator, show_diff=show_diff
     )
-    parser.add_argument("font_path", help="Path to the .ttf or .otf font file")
-    parser.add_argument("--output", "-o", help="Path to save the PDF report (optional)")
-    parser.add_argument(
-        "--no-diff",
-        action="store_true",
-        help="Disable visual difference information in PDF",
-    )
-    parser.add_argument(
-        "--min-ratio",
-        type=float,
-        default=0.0,
-        help="Skip glyph pairs with ratio diff score below this value (default: 0.0)",
-    )
-    parser.add_argument(
-        "--hide-subtle",
-        action="store_true",
-        help=f"Skip glyph pairs with ratio diff score below {SUBTLE_RATIO}",
-    )
-    args = parser.parse_args()
-    min_ratio = (
-        max(args.min_ratio, SUBTLE_RATIO) if args.hide_subtle else args.min_ratio
-    )
-    logging.basicConfig(format="%(levelname)s: %(message)s")
-    logging.captureWarnings(capture=True)
-
-    font_path = Path(args.font_path)
-    if not font_path.exists():
-        logger.error("File not found: %s", font_path)
-        sys.exit(1)
-
-    analyzer = FontAnalyzer(font_path)
-    analyzer.analyze()
-
-    if not analyzer.feature_examples:
-        print("No OpenType features with substitutions found.")
-        return
-
-    actual_font_path = analyzer.create_modified_font()
-    try:
-        comparator = VisualComparator(actual_font_path)
-        analyzer.detect_default_features(comparator)
-
-        print(f"Analyzing font: {font_path}")
-        print("-" * 40)
-        print_console_report(analyzer, comparator if min_ratio else None, min_ratio)
-
-        if args.output:
-            render_pdf_report(
-                analyzer,
-                Path(args.output),
-                actual_font_path,
-                show_diff=not args.no_diff,
-                min_ratio=min_ratio,
-            )
-    finally:
-        if actual_font_path != font_path and actual_font_path.exists():
-            actual_font_path.unlink()
-
-
-if __name__ == "__main__":
-    main()
+    pdf.set_y(y + 5)

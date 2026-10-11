@@ -1,23 +1,25 @@
 [project]
 name = "opentype-features"
 version = "0.1.0"
-description = "Add your description here"
+description = "PDF reports of the OpenType features of fonts"
 readme = "README.md"
 authors = [
     { name = "Thorsten Vitt", email = "thorsten.vitt@uni-wuerzburg.de" }
 ]
 requires-python = ">=3.14"
 dependencies = [
+    "cyclopts>=5.2.0",
     "fontfeatures>=1.9.0",
     "fonttools>=4.61.1",
     "fpdf2>=2.8.5",
     "numpy>=2.4.3",
     "pillow>=12.1.0",
+    "rich>=15.0.0",
     "uharfbuzz>=0.53.3",
 ]
 
 [project.scripts]
-opentype-features = "opentype_features:main"
+opentype-features = "opentype_features.__main__:main"
 
 [build-system]
 requires = ["uv_build>=0.10.0,<0.11.0"]

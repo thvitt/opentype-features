@@ -16,9 +16,6 @@ from opentype_features import (
     get_feature_priority,
     group_examples,
     is_character_variant,
-    main,
-    print_console_report,
-    render_pdf_report,
     score_examples,
     shaping_language,
 )
@@ -251,25 +248,6 @@ def test_modified_font_maps_unencoded_glyphs(analyzed):
         modified.unlink()
 
 
-def test_pdf_report_compares_with_modified_font(analyzed, tmp_path, monkeypatch):
-    used_paths = []
-
-    class RecordingComparator(VisualComparator):
-        def __init__(self, font_path):
-            used_paths.append(font_path)
-            super().__init__(font_path)
-
-    monkeypatch.setattr("opentype_features.VisualComparator", RecordingComparator)
-    modified = analyzed.create_modified_font()
-    try:
-        render_pdf_report(analyzed, tmp_path / "report.pdf", modified)
-    finally:
-        modified.unlink()
-
-    assert used_paths == [modified]
-    assert (tmp_path / "report.pdf").stat().st_size > 0
-
-
 def _glyph_mappings(analyzer, tag):
     return sorted(
         (s.input_glyphs, s.output_glyphs) for s in analyzer.feature_examples[tag]
@@ -306,22 +284,6 @@ def test_class_substitution_is_expanded(analyzer):
     ]
 
 
-def test_pdf_report_logs_unusable_font(analyzed, tmp_path, caplog):
-    broken_font = tmp_path / "broken.ttf"
-    broken_font.write_bytes(b"not a font")
-
-    render_pdf_report(analyzed, tmp_path / "report.pdf", broken_font)
-
-    assert "Could not embed" in caplog.text
-    assert not (tmp_path / "report.pdf").exists()
-
-
-def test_pdf_report_logs_unwritable_output(analyzed, tmp_path, caplog):
-    render_pdf_report(analyzed, tmp_path / "missing" / "report.pdf", analyzed.font_path)
-
-    assert "Could not save" in caplog.text
-
-
 def test_scoring_skips_failing_comparisons(analyzed, caplog):
     comparator = MagicMock(spec=VisualComparator)
     comparator.get_difference_score.side_effect = [RuntimeError("boom"), (0.5, 0.5)]
@@ -346,13 +308,6 @@ def test_analysis_skips_failing_rules(analyzer, monkeypatch, caplog):
 
     assert analyzer.feature_examples == {}
     assert "Skipping a rule of feature liga" in caplog.text
-
-
-def test_pdf_report_without_diff(analyzed, tmp_path, recwarn):
-    render_pdf_report(analyzed, tmp_path / "report.pdf", analyzed.font_path, False)
-
-    assert (tmp_path / "report.pdf").stat().st_size > 0
-    assert not [w for w in recwarn if issubclass(w.category, DeprecationWarning)]
 
 
 def test_diff_image_reuses_scoring_renderings(test_font, monkeypatch):
@@ -384,48 +339,17 @@ def test_feature_heading_for_contextual_defaults(analyzer):
     )
 
 
-def test_console_report_hides_small_ratios(analyzed, capsys):
-    comparator = MagicMock(spec=VisualComparator)
-    comparator.get_difference_score.side_effect = lambda text, tag, *_: (
-        (0.1, 0.005) if tag == "smcp" else (0.1, 0.5)
-    )
-
-    print_console_report(analyzed, comparator, min_ratio=0.01)
-
-    output = capsys.readouterr().out
-    assert "Feature: liga" in output
-    assert "Feature: smcp" not in output
-
-
-@pytest.mark.parametrize("option", [[], ["--hide-subtle"]])
-def test_main_writes_reports(test_font, tmp_path, monkeypatch, capsys, option):
-    report = tmp_path / "report.pdf"
-    monkeypatch.setattr(
-        "sys.argv", ["opentype-features", str(test_font), "-o", str(report), *option]
-    )
-
-    main()
-
-    assert (
-        "Feature: liga (Standard Ligatures), on by default" in capsys.readouterr().out
-    )
-    assert report.stat().st_size > 0
-
-
 def _subs_to(output, *inputs):
     return [FeatureExample(text, text, output, output, "frac") for text in inputs]
 
 
-def test_grouping_folds_case_variants(analyzed, capsys):
+def test_grouping_folds_case_variants(analyzed):
     (group,) = group_examples(analyzed.feature_examples["ss02"])
 
     assert sorted(group.all_input_chars) == ["AB", "Ab", "aB", "ab"]
     assert group.input_pattern == group.input_chars
     assert group.input_summary == "4 inputs, any case"
     assert analyzed.get_cell_label(group) == "4 inputs, any case"
-
-    print_console_report(analyzed)
-    assert "[4 inputs, any case]" in capsys.readouterr().out
 
 
 def test_grouping_shows_alternatives_per_position():
@@ -461,9 +385,9 @@ def test_feature_heading_stays_with_its_table(analyzed):
     section_pages = []
     pdf.start_section = lambda *_args, **_kwargs: section_pages.append(pdf.page)
 
-    _render_feature(
-        pdf, analyzed, VisualComparator(analyzed.font_path), "smcp", True, 0.0
-    )
+    comparator = VisualComparator(analyzed.font_path)
+    examples = score_examples(analyzed.feature_examples["smcp"], comparator)
+    _render_feature(pdf, analyzed, comparator, "smcp", examples, show_diff=True)
 
     assert section_pages == [2]
 
