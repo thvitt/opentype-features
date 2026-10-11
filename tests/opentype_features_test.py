@@ -338,3 +338,45 @@ def test_class_substitution_is_expanded(analyzer):
         ("a", "a.sc"),
         ("b", "b.sc"),
     ]
+
+
+def test_pdf_report_logs_unusable_font(analyzed, tmp_path, caplog):
+    broken_font = tmp_path / "broken.ttf"
+    broken_font.write_bytes(b"not a font")
+
+    render_pdf_report(analyzed, tmp_path / "report.pdf", broken_font)
+
+    assert "Could not embed" in caplog.text
+    assert not (tmp_path / "report.pdf").exists()
+
+
+def test_pdf_report_logs_unwritable_output(analyzed, tmp_path, caplog):
+    render_pdf_report(analyzed, tmp_path / "missing" / "report.pdf", analyzed.font_path)
+
+    assert "Could not save" in caplog.text
+
+
+def test_scoring_skips_failing_comparisons(analyzed, caplog):
+    comparator = MagicMock(spec=VisualComparator)
+    comparator.get_difference_score.side_effect = [RuntimeError("boom"), (0.5, 0.5)]
+    subs = analyzed.feature_substitutions["calt"]
+
+    scored = score_substitutions(subs, comparator)
+
+    assert [s.input_glyphs for s in scored] == [subs[1].input_glyphs]
+    assert "Could not compare" in caplog.text
+
+
+def test_analysis_skips_failing_rules(analyzer, monkeypatch, caplog):
+    def fail(*_args):
+        raise ValueError("unsupported")
+
+    monkeypatch.setattr(analyzer, "_process_rule", fail)
+    routine = MagicMock(languages=[("latn", "dflt")], rules=[object()])
+    font_features = MagicMock(features={"liga": [MagicMock(routine=routine)]})
+    monkeypatch.setattr("opentype_features.unparse", lambda _font: font_features)
+
+    analyzer.analyze()
+
+    assert analyzer.feature_substitutions == {}
+    assert "Skipping a rule of feature liga" in caplog.text

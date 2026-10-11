@@ -1,6 +1,7 @@
 """Analyze OpenType features in a font file and generate reports."""
 
 import argparse
+import logging
 import sys
 import tempfile
 from dataclasses import dataclass, replace
@@ -19,10 +20,12 @@ from PIL import Image, ImageDraw, ImageFont
 
 from opentype_features.feature_names import FEATURE_NAMES, LANGUAGE_NAMES
 
+logger = logging.getLogger(__name__)
+
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from fontFeatures import Routine
+    from fontFeatures import Routine, Rule
 
 # Private Use Area for rendering unmapped glyphs
 # Use Supplementary Private Use Area-A to avoid 0xFFFF boundary
@@ -457,16 +460,28 @@ class FontAnalyzer:
                 )
 
                 for rule in routine.rules:
-                    if isinstance(rule, FFSubstitution):
-                        self._process_ff_substitution(rule, tag, langs, result_map)
-                    elif isinstance(rule, Chaining):
-                        self._process_ff_chaining(rule, tag, langs, result_map)
+                    try:
+                        self._process_rule(rule, tag, langs, result_map)
+                    except Exception as error:
+                        logger.warning("Skipping a rule of feature %s: %r", tag, error)
 
         self.feature_substitutions = {}
         for sub in result_map.values():
             if sub.feature_tag not in self.feature_substitutions:
                 self.feature_substitutions[sub.feature_tag] = []
             self.feature_substitutions[sub.feature_tag].append(sub)
+
+    def _process_rule(
+        self,
+        rule: Rule,
+        tag: str,
+        langs: tuple[str, ...],
+        result_map: dict[tuple[str, str, str], Substitution],
+    ) -> None:
+        if isinstance(rule, FFSubstitution):
+            self._process_ff_substitution(rule, tag, langs, result_map)
+        elif isinstance(rule, Chaining):
+            self._process_ff_chaining(rule, tag, langs, result_map)
 
     def _process_ff_substitution(
         self,
@@ -988,9 +1003,15 @@ def score_substitutions(
     """Return the visibly changing substitutions, annotated with their scores."""
     scored = []
     for sub in subs:
-        diff_total, diff_ratio = comparator.get_difference_score(
-            sub.input_chars, sub.feature_tag, sub.languages, sub.feature_value
-        )
+        try:
+            diff_total, diff_ratio = comparator.get_difference_score(
+                sub.input_chars, sub.feature_tag, sub.languages, sub.feature_value
+            )
+        except Exception:
+            logger.exception(
+                "Could not compare %s for feature %s", sub.input_glyphs, sub.feature_tag
+            )
+            continue
         if diff_total > DIFF_THRESHOLD_NONE and diff_ratio >= min_ratio:
             scored.append(replace(sub, diff_total=diff_total, diff_ratio=diff_ratio))
     return scored
@@ -1012,8 +1033,8 @@ def render_pdf_report(
         pdf.set_font("Helvetica", "B", 16)
         pdf.cell(0, 10, f"OpenType Feature Report: {analyzer.font_path.name}", ln=True)
         pdf.ln(5)
-    except Exception as e:
-        print(f"Warning: Could not embed font for PDF: {e}")
+    except Exception:
+        logger.exception("Could not embed %s in the PDF report", actual_font_path)
         return
 
     supported = analyzer.get_supported_features()
@@ -1031,12 +1052,31 @@ def render_pdf_report(
     )
 
     for tag in remaining_tags:
-        subs = score_substitutions(
-            analyzer.feature_substitutions[tag], comparator, min_ratio
-        )
-        if not subs:
-            continue
+        try:
+            _render_feature(pdf, analyzer, comparator, tag, show_diff, min_ratio)
+        except Exception:
+            logger.exception("Could not render feature %s", tag)
 
+    try:
+        pdf.output(str(output_path))
+        print(f"\nPDF report saved to: {output_path}")
+    except Exception:
+        logger.exception("Could not save the PDF report to %s", output_path)
+
+
+def _render_feature(
+    pdf: FPDF,
+    analyzer: FontAnalyzer,
+    comparator: VisualComparator,
+    tag: str,
+    show_diff: bool,
+    min_ratio: float,
+) -> None:
+    """Render the section of a single feature."""
+    subs = score_substitutions(
+        analyzer.feature_substitutions[tag], comparator, min_ratio
+    )
+    if subs:
         friendly_name = analyzer.get_tag_name(tag)
 
         if pdf.get_y() > PAGE_BREAK_THRESHOLD:
@@ -1047,17 +1087,10 @@ def render_pdf_report(
         pdf.set_text_color(0)
         pdf.cell(0, 10, f"Feature: {tag} ({friendly_name})", ln=True)
 
-        y = pdf.get_y()
         y = _render_compact_table(
-            pdf, subs, tag, y, analyzer, comparator, show_diff=show_diff
+            pdf, subs, tag, pdf.get_y(), analyzer, comparator, show_diff=show_diff
         )
         pdf.set_y(y + 5)
-
-    try:
-        pdf.output(str(output_path))
-        print(f"\nPDF report saved to: {output_path}")
-    except Exception as e:
-        print(f"Error saving PDF: {e}")
 
 
 def print_console_report(analyzer: FontAnalyzer) -> None:
@@ -1094,10 +1127,12 @@ def main() -> None:
         help="Skip glyph pairs with ratio diff score below this value (default: 0.0)",
     )
     args = parser.parse_args()
+    logging.basicConfig(format="%(levelname)s: %(message)s")
+    logging.captureWarnings(capture=True)
 
     font_path = Path(args.font_path)
     if not font_path.exists():
-        print(f"Error: File not found: {font_path}")
+        logger.error("File not found: %s", font_path)
         sys.exit(1)
 
     analyzer = FontAnalyzer(font_path)
