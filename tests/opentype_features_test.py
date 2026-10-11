@@ -4,15 +4,12 @@ from unittest.mock import MagicMock
 import pytest
 from fontFeatures import Substitution
 from fontTools.ttLib import TTFont
-from fpdf import FPDF
 
 from opentype_features import (
-    PAGE_BOTTOM_MARGIN,
     PUA_START,
     FeatureExample,
     FontAnalyzer,
     VisualComparator,
-    _render_feature,
     get_feature_priority,
     group_examples,
     is_character_variant,
@@ -143,14 +140,6 @@ def test_get_figure_chars(analyzer):
     assert chars == "0123456789%a"
     assert "x" not in chars
     assert chr(PUA_START) not in chars
-
-
-@pytest.fixture
-def analyzed(test_font):
-    """A FontAnalyzer that has analyzed the synthetic test font."""
-    a = FontAnalyzer(test_font)
-    a.analyze()
-    return a
 
 
 def _scored(analyzer, tag, font_path=None):
@@ -374,22 +363,6 @@ def test_grouping_keeps_small_groups_and_order():
         *_subs_to("x", "ee"),
     ]
     assert group_examples(subs) == subs
-
-
-def test_feature_heading_stays_with_its_table(analyzed):
-    pdf = FPDF()
-    pdf.set_auto_page_break(False)
-    pdf.add_font("TargetFont", fname=str(analyzed.font_path))
-    pdf.add_page()
-    pdf.set_y(PAGE_BOTTOM_MARGIN - 30)
-    section_pages = []
-    pdf.start_section = lambda *_args, **_kwargs: section_pages.append(pdf.page)
-
-    comparator = VisualComparator(analyzed.font_path)
-    examples = score_examples(analyzed.feature_examples["smcp"], comparator)
-    _render_feature(pdf, analyzed, comparator, "smcp", examples, show_diff=True)
-
-    assert section_pages == [2]
 
 
 def test_all_alternates_of_stylistic_alternates_are_shown(analyzed):

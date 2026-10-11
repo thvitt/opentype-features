@@ -5,6 +5,8 @@ from fontTools.feaLib.builder import addOpenTypeFeaturesFromString
 from fontTools.fontBuilder import FontBuilder
 from fontTools.pens.ttGlyphPen import TTGlyphPen
 
+from opentype_features import FontAnalyzer
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -97,3 +99,11 @@ def test_font(tmp_path_factory: pytest.TempPathFactory) -> Path:
     path = tmp_path_factory.mktemp("fonts") / "FeatureTest.ttf"
     builder.save(str(path))
     return path
+
+
+@pytest.fixture
+def analyzed(test_font):
+    """A FontAnalyzer that has analyzed the synthetic test font."""
+    a = FontAnalyzer(test_font)
+    a.analyze()
+    return a

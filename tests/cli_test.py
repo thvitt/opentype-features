@@ -19,7 +19,7 @@ def _summary_text(analyzer, examples, report_path):
     return console.export_text()
 
 
-@pytest.mark.parametrize("options", [[], ["--hide-subtle"], ["--no-diff"]])
+@pytest.mark.parametrize("options", [[], ["--hide-subtle"], ["--diff"]])
 def test_report_writes_pdf_next_to_working_directory(test_font, in_tmp_path, options):
     app([str(test_font), *options], result_action="return_value")
 

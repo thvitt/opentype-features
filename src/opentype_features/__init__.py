@@ -8,7 +8,7 @@ import math
 import tempfile
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 import numpy as np
 import uharfbuzz as hb
@@ -22,7 +22,6 @@ from fontFeatures import (
 from fontFeatures.ttLib import unparse
 from fontTools.ttLib import TTFont
 from fontTools.ttLib.tables._c_m_a_p import CmapSubtable
-from fpdf import FPDF, XPos, YPos
 from PIL import Image, ImageDraw, ImageFont
 
 from opentype_features.feature_names import FEATURE_NAMES, LANGUAGE_NAMES
@@ -38,16 +37,9 @@ if TYPE_CHECKING:
 # Use Supplementary Private Use Area-A to avoid 0xFFFF boundary
 PUA_START = 0xF0000
 
-# PDF Layout Constants
-HEADING_HEIGHT = 10
-ROW_HEIGHT = 8
-PAGE_BOTTOM_MARGIN = 275
-ROW_LABEL_WIDTH = 15
-CELL_LABEL_HEIGHT = 3
 
 # Visual Difference Thresholds
 DIFF_THRESHOLD_NONE = 0.0001  # Technical but no visual difference
-DIFF_THRESHOLD_SMALL = 0.1  # Subtle visual difference
 SUBTLE_RATIO = 0.01  # Relative difference hidden by --hide-subtle
 RENDER_CACHE_SIZE = 1024
 
@@ -459,17 +451,17 @@ class FontAnalyzer:
             label_id = getattr(params, "UINameID", None) or getattr(
                 params, "FeatUILabelNameID", None
             )
-            if label_id and (name := self._get_name(label_id)):
+            if label_id and (name := self.get_name(label_id)):
                 self.custom_feature_names[tag] = name
 
             first_param_id = getattr(params, "FirstParamUILabelNameID", 0)
             if first_param_id:
                 self.variant_names[tag] = [
-                    self._get_name(first_param_id + i) or ""
+                    self.get_name(first_param_id + i) or ""
                     for i in range(params.NumNamedParameters)
                 ]
 
-    def _get_name(self, name_id: int) -> str | None:
+    def get_name(self, name_id: int) -> str | None:
         """Look up a string in the name table, preferring English entries."""
         name_table = self.font["name"]
         name_rec = name_table.getName(name_id, 3, 1, 0x409) or name_table.getName(
@@ -847,233 +839,6 @@ class FontAnalyzer:
         return temp_path
 
 
-def _render_compact_table(
-    pdf: FPDF,
-    subs: list[FeatureExample],
-    y: float,
-    analyzer: FontAnalyzer,
-    comparator: VisualComparator,
-    show_diff: bool = True,
-) -> float:
-    """Render mappings in a compact horizontal table."""
-    max_width = 190
-
-    i = 0
-    while i < len(subs):
-        chunk, i = _get_next_sub_chunk(subs, i, max_width - ROW_LABEL_WIDTH)
-        cell_labels = [analyzer.get_cell_label(sub) for sub, _width in chunk]
-        has_labels = any(cell_labels)
-
-        if y + _chunk_height(show_diff, has_labels) > PAGE_BOTTOM_MARGIN:
-            pdf.add_page()
-            y = 15
-
-        y = _render_chunk_row(pdf, chunk, "off", y, comparator, show_diff)
-        if has_labels:
-            y = _render_cell_labels(pdf, chunk, cell_labels, y)
-        y = _render_chunk_row(pdf, chunk, "on", y, comparator, show_diff)
-        if show_diff:
-            y = _render_chunk_row(pdf, chunk, "diff", y, comparator, show_diff)
-        y += 4  # Padding between chunks
-
-    return y
-
-
-def _chunk_height(show_diff: bool, has_labels: bool) -> float:
-    """Return the height of one chunk of the compact table, including padding."""
-    rows_to_render = 3 if show_diff else 2
-    return rows_to_render * ROW_HEIGHT + 4 + (CELL_LABEL_HEIGHT if has_labels else 0)
-
-
-def _get_next_sub_chunk(
-    subs: list[FeatureExample], start_index: int, available_width: float
-) -> tuple[list[tuple[FeatureExample, float]], int]:
-    """Calculate how many substitutions fit in the current row."""
-    chunk = []
-    current_row_width: float = 0
-    i = start_index
-    while i < len(subs):
-        sub = subs[i]
-        # Estimate width: 10 units base + 5 per extra char
-        sub_width = 10 + (max(len(sub.input_pattern), len(sub.output_chars)) - 1) * 5
-        if current_row_width + sub_width > available_width:
-            if not chunk:  # Single very long sub
-                chunk.append((sub, sub_width))
-                i += 1
-            break
-        chunk.append((sub, sub_width))
-        current_row_width += sub_width
-        i += 1
-    return chunk, i
-
-
-def _render_chunk_row(
-    pdf: FPDF,
-    chunk: list[tuple[FeatureExample, float]],
-    mode: Literal["off", "on", "diff"],
-    y: float,
-    comparator: VisualComparator,
-    show_diff: bool,
-) -> float:
-    """Render a single row (off, on, or diff) for a chunk of substitutions."""
-    pdf.set_xy(10, y)
-    pdf.set_text_color(120)
-    pdf.set_font("Helvetica", "I", 7)
-    pdf.cell(ROW_LABEL_WIDTH, ROW_HEIGHT, f"{mode}:", align="L")
-
-    pdf.set_font("TargetFont", "", 10)
-
-    for sub, width in chunk:
-        tag = sub.feature_tag
-        x_pos = pdf.get_x()
-        if mode == "diff":
-            # Render diff bitmap ONLY in diff mode
-            diff_img = comparator.get_diff_image(
-                sub.input_chars, tag, sub.languages, sub.feature_value
-            )
-
-            # Constant resolution: scale based on fixed pixel height
-            # Font height in pixels: ascent + descent + 20% padding
-            ascent, descent = comparator.pil_font.getmetrics()
-            total_px_h = ascent + descent + int(comparator.size * 0.2)
-
-            # Target height in PDF (mm)
-            target_mm_h = ROW_HEIGHT - 2
-            scale = target_mm_h / total_px_h
-
-            img_h = target_mm_h
-            img_w = diff_img.width * scale
-
-            # Constrain width if it exceeds cell width
-            if img_w > width - 2:
-                img_w = width - 2
-                img_h = (diff_img.height / diff_img.width) * img_w
-
-            pdf.image(
-                diff_img, x=x_pos + (width - img_w) / 2, y=y + 1, w=img_w, h=img_h
-            )
-            # Advance X position
-            pdf.set_xy(x_pos + width, y)
-        elif mode == "on":
-            if show_diff and sub.diff_total < DIFF_THRESHOLD_SMALL:
-                # Subtle difference overlay: off (light gray) + on (red)
-                pdf.set_text_color(220)
-                pdf.set_text_shaping(use_shaping_engine=False)
-                pdf.cell(width, ROW_HEIGHT, sub.input_chars, align="C")
-
-                pdf.set_xy(x_pos, y)
-                pdf.set_text_color(200, 50, 50)
-                pdf.set_text_shaping(
-                    use_shaping_engine=True,
-                    features={**BASELINE_FEATURES, tag: sub.feature_value},  # type: ignore[bad-argument-type]
-                    language=shaping_language(sub.languages),
-                )
-                pdf.cell(width, ROW_HEIGHT, sub.input_chars, align="C")
-            else:
-                # Normal 'on' rendering
-                pdf.set_text_color(0)
-                pdf.set_text_shaping(
-                    use_shaping_engine=True,
-                    features={**BASELINE_FEATURES, tag: sub.feature_value},  # type: ignore[bad-argument-type]
-                    language=shaping_language(sub.languages),
-                )
-                pdf.cell(width, ROW_HEIGHT, sub.input_chars, align="C")
-
-            # Score label
-            if show_diff:
-                current_y = pdf.get_y()
-                pdf.set_xy(x_pos, current_y + ROW_HEIGHT - 2)
-                pdf.set_font("Helvetica", "I", 3)
-                pdf.set_text_color(180)
-                score_text = f"t:{sub.diff_total:.1%} r:{sub.diff_ratio:.1%}"
-                pdf.cell(width, 2, score_text, align="C")
-                pdf.set_xy(x_pos + width, current_y)
-                pdf.set_font("TargetFont", "", 10)
-                pdf.set_text_color(0)
-
-        else:
-            # Mode 'off': Normal rendering
-            pdf.set_text_color(0)
-            pdf.set_text_shaping(use_shaping_engine=False)
-            pdf.cell(width, ROW_HEIGHT, sub.input_pattern, align="C")
-
-    return y + ROW_HEIGHT
-
-
-def _render_cell_labels(
-    pdf: FPDF, chunk: list[tuple[FeatureExample, float]], labels: list[str], y: float
-) -> float:
-    """Render small labels above the substitutions, e.g. their languages or variant."""
-    label_size = 4
-    pdf.set_text_color(150)
-    x: float = 10 + ROW_LABEL_WIDTH
-    for (_sub, width), text in zip(chunk, labels, strict=True):
-        pdf.set_font("Helvetica", "I", label_size)
-        text_width = pdf.get_string_width(text)
-        if text_width > width - 1:
-            pdf.set_font_size(label_size * (width - 1) / text_width)
-        pdf.set_xy(x, y)
-        pdf.cell(width, CELL_LABEL_HEIGHT, text, align="C")
-        x += width
-    pdf.set_text_color(0)
-    return y + CELL_LABEL_HEIGHT
-
-
-def _render_figures_section(
-    pdf: FPDF, analyzer: FontAnalyzer, supported: set[str]
-) -> float:
-    """Render a combined section for figure feature combinations."""
-    pdf.start_section("Figures", level=0)
-    pdf.set_font("Helvetica", "B", 12)
-    pdf.set_text_color(0)
-    pdf.cell(0, 10, "Figures", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-    y = pdf.get_y()
-
-    fig_chars = analyzer.get_figure_chars()
-
-    v_options: list[str | None] = [None]
-    if "lnum" in supported:
-        v_options.append("lnum")
-    if "onum" in supported:
-        v_options.append("onum")
-
-    h_options: list[str | None] = [None]
-    if "pnum" in supported:
-        h_options.append("pnum")
-    if "tnum" in supported:
-        h_options.append("tnum")
-
-    for v in v_options:
-        for h in h_options:
-            if y + 10 > PAGE_BOTTOM_MARGIN:
-                pdf.add_page()
-                y = 15
-
-            features = {}
-            parts = []
-            if v:
-                features[v] = True
-                parts.append(analyzer.get_tag_name(v))
-            if h:
-                features[h] = True
-                parts.append(analyzer.get_tag_name(h))
-
-            label = " + ".join(parts) if parts else "Default"
-
-            pdf.set_xy(10, y)
-            pdf.set_font("Helvetica", "", 8)
-            pdf.set_text_color(100)
-            pdf.cell(50, 10, label, align="L")
-
-            pdf.set_font("TargetFont", "", 12)
-            pdf.set_text_color(0)
-            pdf.set_text_shaping(use_shaping_engine=True, features=features)
-            pdf.cell(0, 10, fig_chars, align="L")
-            y += 10
-
-    return y + 5
-
-
 def shaping_language(languages: tuple[str, ...]) -> str | None:
     """
     Return a HarfBuzz language selecting the OpenType language system of a rule.
@@ -1282,87 +1047,16 @@ def collect_examples(
     }
 
 
-def render_pdf_report(
-    analyzer: FontAnalyzer,
-    examples_by_tag: dict[str, list[FeatureExample]],
-    output_path: Path,
-    actual_font_path: Path,
-    comparator: VisualComparator,
-    show_diff: bool = True,
-) -> None:
-    """Write a PDF report of the examples of each feature."""
-    pdf = FPDF()
-    pdf.set_auto_page_break(False)
-    pdf.add_page()
-    pdf.add_font("TargetFont", style="", fname=str(actual_font_path))
-    pdf.set_font("Helvetica", "B", 16)
-    pdf.cell(
-        0,
-        10,
-        f"OpenType Feature Report: {analyzer.font_path.name}",
-        new_x=XPos.LMARGIN,
-        new_y=YPos.NEXT,
-    )
-
-    pdf.set_font("Helvetica", "", 9)
-    for label, tags in [
-        ("On by default", analyzer.default_features),
-        ("On by default in some contexts", analyzer.contextual_default_features),
-    ]:
-        if tags:
-            pdf.cell(
-                0,
-                5,
-                f"{label}: {', '.join(sorted(tags))}",
-                new_x=XPos.LMARGIN,
-                new_y=YPos.NEXT,
-            )
-    pdf.ln(5)
-
-    supported = analyzer.get_supported_features()
-    if supported & FIGURE_TAGS:
-        y = _render_figures_section(pdf, analyzer, supported)
-        pdf.set_y(y)
-
-    for tag, examples in examples_by_tag.items():
-        if tag in FIGURE_TAGS or not examples:
-            continue
-        try:
-            _render_feature(pdf, analyzer, comparator, tag, examples, show_diff)
-        except Exception:
-            logger.exception("Could not render feature %s", tag)
-
-    pdf.output(str(output_path))
-
-
-def _render_feature(
-    pdf: FPDF,
-    analyzer: FontAnalyzer,
-    comparator: VisualComparator,
-    tag: str,
-    examples: list[FeatureExample],
-    show_diff: bool,
-) -> None:
-    """Render the section of a single feature."""
-    friendly_name = analyzer.get_tag_name(tag)
-
-    # Keep the heading together with the first chunk of its table
-    first_chunk_height = _chunk_height(show_diff, has_labels=True)
-    if pdf.get_y() + HEADING_HEIGHT + first_chunk_height > PAGE_BOTTOM_MARGIN:
-        pdf.add_page()
-
-    pdf.start_section(f"{tag}: {friendly_name}", level=0)
-    pdf.set_font("Helvetica", "B", 12)
-    pdf.set_text_color(0)
-    pdf.cell(
-        0,
-        HEADING_HEIGHT,
-        f"Feature: {analyzer.get_feature_heading(tag)}",
-        new_x=XPos.LMARGIN,
-        new_y=YPos.NEXT,
-    )
-
-    y = _render_compact_table(
-        pdf, examples, pdf.get_y(), analyzer, comparator, show_diff=show_diff
-    )
-    pdf.set_y(y + 5)
+def feature_notes(
+    analyzer: FontAnalyzer, tag: str, examples: list[FeatureExample]
+) -> list[str]:
+    """Describe which of the feature's examples are not shown individually."""
+    notes = []
+    if total := analyzer.positioning_totals.get(tag):
+        notes.append(f"{MAX_POSITIONING_EXAMPLES} strongest of {total} positionings")
+    shown_inputs = sum(1 + len(e.input_variants) for e in examples)
+    if hidden := len(analyzer.feature_examples[tag]) - shown_inputs:
+        notes.append(f"{hidden} invisible or too subtle")
+    if folded := sum(len(e.input_variants) for e in examples):
+        notes.append(f"{folded} similar inputs folded")
+    return notes

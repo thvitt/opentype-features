@@ -11,13 +11,13 @@ from rich.table import Table
 from rich.text import Text
 
 from opentype_features import (
-    MAX_POSITIONING_EXAMPLES,
     SUBTLE_RATIO,
     FontAnalyzer,
     VisualComparator,
     collect_examples,
-    render_pdf_report,
+    feature_notes,
 )
+from opentype_features.pdf_report import render_pdf_report
 
 if TYPE_CHECKING:
     from opentype_features import FeatureExample
@@ -34,7 +34,7 @@ def report(
     /,
     *,
     output: Annotated[Path | None, Parameter(alias="-o")] = None,
-    diff: bool = True,
+    diff: bool = False,
     min_ratio: float = 0.0,
     hide_subtle: Annotated[bool, Parameter(negative=())] = False,
 ) -> None:
@@ -44,7 +44,7 @@ def report(
     Args:
         font: the .ttf or .otf font file to analyze
         output: path of the PDF report [default: FONT name + "-features.pdf"]
-        diff: show the visual difference of each example in the report
+        diff: add a picture of the pixel difference to each example
         min_ratio: hide examples whose relative visual difference is smaller
         hide_subtle: hide examples whose relative visual difference is below 1%
 
@@ -92,14 +92,13 @@ def summarize(
 
     for tag, examples in examples_by_tag.items():
         found = analyzer.count_examples(tag)
-        shown_inputs = sum(1 + len(e.input_variants) for e in examples)
         table.add_row(
             tag,
             analyzer.get_tag_name(tag),
             _default_status(analyzer, tag),
             str(len(examples)),
             str(found),
-            "; ".join(_notes(analyzer, tag, examples, shown_inputs)),
+            "; ".join(feature_notes(analyzer, tag, examples)),
             style=None if examples else "dim",
         )
 
@@ -121,19 +120,3 @@ def _default_status(analyzer: FontAnalyzer, tag: str) -> str:
     if tag in analyzer.contextual_default_features:
         return "in context"
     return ""
-
-
-def _notes(
-    analyzer: FontAnalyzer,
-    tag: str,
-    examples: list[FeatureExample],
-    shown_inputs: int,
-) -> list[str]:
-    notes = []
-    if total := analyzer.positioning_totals.get(tag):
-        notes.append(f"{MAX_POSITIONING_EXAMPLES} strongest of {total} positionings")
-    if hidden := len(analyzer.feature_examples[tag]) - shown_inputs:
-        notes.append(f"{hidden} invisible or too subtle")
-    if folded := sum(len(e.input_variants) for e in examples):
-        notes.append(f"{folded} similar inputs folded")
-    return notes
