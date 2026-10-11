@@ -11,6 +11,7 @@ from opentype_features import (
     Substitution,
     VisualComparator,
     get_feature_priority,
+    group_substitutions,
     is_character_variant,
     main,
     print_console_report,
@@ -406,3 +407,43 @@ def test_main_writes_reports(test_font, tmp_path, monkeypatch, capsys, option):
         "Feature: liga (Standard Ligatures), on by default" in capsys.readouterr().out
     )
     assert report.stat().st_size > 0
+
+
+def _subs_to(output, *inputs):
+    return [Substitution(text, text, output, output, "frac") for text in inputs]
+
+
+def test_grouping_folds_case_variants(analyzed, capsys):
+    (group,) = group_substitutions(analyzed.feature_substitutions["ss02"])
+
+    assert sorted(group.all_input_chars) == ["AB", "Ab", "aB", "ab"]
+    assert group.input_pattern == group.input_chars
+    assert group.input_summary == "4 inputs, any case"
+    assert analyzed.get_cell_label(group) == "4 inputs, any case"
+
+    print_console_report(analyzed)
+    assert "[4 inputs, any case]" in capsys.readouterr().out
+
+
+def test_grouping_shows_alternatives_per_position():
+    (group,) = group_substitutions(_subs_to("‰", "0/00", "0/0⁰", "0⁄00", "0⁄0⁰"))
+
+    assert group.input_pattern == "0[/⁄]0[0⁰]"
+    assert group.input_summary == "4 inputs"
+
+
+def test_grouping_without_common_pattern():
+    (group,) = group_substitutions(_subs_to("x", "ab", "cd", "ef", "gh"))
+
+    assert group.input_alternatives is None
+    assert group.input_pattern == "ab"
+    assert group.input_summary == "4 inputs"
+
+
+def test_grouping_keeps_small_groups_and_order():
+    subs = [
+        *_subs_to("x", "a", "b", "c"),
+        *_subs_to("y", "dd"),
+        *_subs_to("x", "ee"),
+    ]
+    assert group_substitutions(subs) == subs

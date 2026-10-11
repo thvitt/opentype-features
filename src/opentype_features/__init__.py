@@ -3,6 +3,7 @@
 import argparse
 import functools
 import logging
+import math
 import sys
 import tempfile
 from dataclasses import dataclass, replace
@@ -44,6 +45,9 @@ DIFF_THRESHOLD_NONE = 0.0001  # Technical but no visual difference
 DIFF_THRESHOLD_SMALL = 0.1  # Subtle visual difference
 SUBTLE_RATIO = 0.01  # Relative difference hidden by --hide-subtle
 RENDER_CACHE_SIZE = 1024
+
+# Minimum number of inputs mapping to the same output to be shown as one entry
+MIN_GROUP_SIZE = 4
 
 # Applied by script-specific shapers depending on the context, e.g. Arabic joining
 SHAPER_CONTEXT_FEATURES = frozenset(
@@ -94,6 +98,51 @@ class Substitution:
     diff_total: float = 1.0
     diff_ratio: float = 1.0
     feature_value: int = 1
+    # Further substitutions with inputs of the same length and the same output
+    input_variants: tuple[Substitution, ...] = ()
+
+    @property
+    def all_input_chars(self) -> list[str]:
+        """Return the input of this substitution and of its folded variants."""
+        return [self.input_chars, *(v.input_chars for v in self.input_variants)]
+
+    @property
+    def input_alternatives(self) -> list[list[str]] | None:
+        """Return the characters per position if the inputs are all combinations."""
+        inputs = self.all_input_chars
+        positions = [list(dict.fromkeys(chars)) for chars in zip(*inputs, strict=True)]
+        if math.prod(len(chars) for chars in positions) == len(inputs):
+            return positions
+        return None
+
+    @property
+    def differs_only_in_case(self) -> bool:
+        """Check whether the inputs are all letter case combinations of one text."""
+        positions = self.input_alternatives
+        return positions is not None and all(
+            len({char.casefold() for char in chars}) == 1 for chars in positions
+        )
+
+    @property
+    def input_pattern(self) -> str:
+        """Return the input, with bracketed alternatives for folded variants."""
+        positions = self.input_alternatives
+        if not self.input_variants or positions is None or self.differs_only_in_case:
+            return self.input_chars
+        return "".join(
+            chars[0] if len(chars) == 1 else f"[{''.join(chars)}]"
+            for chars in positions
+        )
+
+    @property
+    def input_summary(self) -> str:
+        """Describe the folded input variants, if any."""
+        if not self.input_variants:
+            return ""
+        summary = f"{len(self.all_input_chars)} inputs"
+        if self.differs_only_in_case:
+            summary += ", any case"
+        return summary
 
 
 class VisualComparator:
@@ -467,8 +516,10 @@ class FontAnalyzer:
     def get_cell_label(self, sub: Substitution) -> str:
         """Return the small label shown above a substitution in the report."""
         if sub.feature_tag == "locl" and sub.languages:
-            return ",".join(self.get_language_name(lang) for lang in sub.languages)
-        return self.get_variant_label(sub)
+            label = ",".join(self.get_language_name(lang) for lang in sub.languages)
+        else:
+            label = self.get_variant_label(sub)
+        return ", ".join(part for part in (label, sub.input_summary) if part)
 
     def get_language_name(self, lang_tag: str) -> str:
         """Return the friendly name for an OpenType language tag."""
@@ -725,7 +776,7 @@ def _get_next_sub_chunk(
     while i < len(subs):
         sub = subs[i]
         # Estimate width: 10 units base + 5 per extra char
-        sub_width = 10 + (max(len(sub.input_chars), len(sub.output_chars)) - 1) * 5
+        sub_width = 10 + (max(len(sub.input_pattern), len(sub.output_chars)) - 1) * 5
         if current_row_width + sub_width > available_width:
             if not chunk:  # Single very long sub
                 chunk.append((sub, sub_width))
@@ -825,7 +876,7 @@ def _render_chunk_row(
             # Mode 'off': Normal rendering
             pdf.set_text_color(0)
             pdf.set_text_shaping(use_shaping_engine=False)
-            pdf.cell(width, ROW_HEIGHT, sub.input_chars, align="C")
+            pdf.cell(width, ROW_HEIGHT, sub.input_pattern, align="C")
 
     return y + ROW_HEIGHT
 
@@ -1032,6 +1083,23 @@ def get_feature_priority(tag: str) -> tuple[int, str]:
     return (priority, tag)
 
 
+def group_substitutions(subs: list[Substitution]) -> list[Substitution]:
+    """Fold many equally long inputs producing the same output into one entry."""
+    groups: dict[tuple[str, int, int], list[Substitution]] = {}
+    for sub in subs:
+        key = (sub.output_chars, sub.feature_value, len(sub.input_chars))
+        groups.setdefault(key, []).append(sub)
+
+    grouped = []
+    for sub in subs:
+        group = groups[sub.output_chars, sub.feature_value, len(sub.input_chars)]
+        if len(group) < MIN_GROUP_SIZE:
+            grouped.append(sub)
+        elif sub is group[0]:
+            grouped.append(replace(sub, input_variants=tuple(group[1:])))
+    return grouped
+
+
 def score_substitutions(
     subs: list[Substitution], comparator: VisualComparator, min_ratio: float = 0.0
 ) -> list[Substitution]:
@@ -1127,8 +1195,8 @@ def _render_feature(
     min_ratio: float,
 ) -> None:
     """Render the section of a single feature."""
-    subs = score_substitutions(
-        analyzer.feature_substitutions[tag], comparator, min_ratio
+    subs = group_substitutions(
+        score_substitutions(analyzer.feature_substitutions[tag], comparator, min_ratio)
     )
     if subs:
         friendly_name = analyzer.get_tag_name(tag)
@@ -1171,12 +1239,17 @@ def print_console_report(
             if not subs:
                 continue
         print(f"\nFeature: {analyzer.get_feature_heading(tag)}")
-        for sub in subs:
-            variant_label = analyzer.get_variant_label(sub)
+        for sub in group_substitutions(subs):
+            notes = [analyzer.get_variant_label(sub), sub.input_summary]
+            if sub.input_variants and sub.input_alternatives is None:
+                notes.append(
+                    "also: " + "; ".join(v.input_glyphs for v in sub.input_variants)
+                )
+            note_text = ", ".join(note for note in notes if note)
             print(
-                f"  {sub.input_glyphs} ({sub.input_chars}) -> "
+                f"  {sub.input_glyphs} ({sub.input_pattern}) -> "
                 f"{sub.output_glyphs} ({sub.output_chars})"
-                + (f" [{variant_label}]" if variant_label else "")
+                + (f" [{note_text}]" if note_text else "")
             )
 
 

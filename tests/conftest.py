@@ -25,9 +25,12 @@ GLYPH_ORDER = [
     "d.alt2",
     "f_i",
     "i.TRK",
+    "A",
+    "B",
+    "warning",
 ]
 
-CMAP = {ord(name): name for name in "abcdfi"} | {ord(" "): "space"}
+CMAP = {ord(name): name for name in "abcdfiAB"} | {ord(" "): "space"}
 
 FEATURES = """
 languagesystem DFLT dflt;
@@ -46,6 +49,7 @@ feature calt { sub [b c]' lookup ALT a; } calt;
 feature clig { sub f' lookup LIG i' a; } clig;
 feature dlig { sub b' lookup ALT c' lookup SC lookup ALT; } dlig;
 feature cv01 { sub d from [d.alt1 d.alt2]; } cv01;
+feature ss02 { sub [a A] [b B] by warning; } ss02;
 """
 
 
