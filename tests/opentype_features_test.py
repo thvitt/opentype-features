@@ -12,6 +12,8 @@ from opentype_features import (
     VisualComparator,
     get_feature_priority,
     is_character_variant,
+    main,
+    print_console_report,
     render_pdf_report,
     score_substitutions,
     shaping_language,
@@ -376,3 +378,31 @@ def test_feature_heading_for_contextual_defaults(analyzer):
     assert analyzer.get_feature_heading("frac") == (
         "frac (Fractions), on by default in some contexts"
     )
+
+
+def test_console_report_hides_small_ratios(analyzed, capsys):
+    comparator = MagicMock(spec=VisualComparator)
+    comparator.get_difference_score.side_effect = lambda text, tag, *_: (
+        (0.1, 0.005) if tag == "smcp" else (0.1, 0.5)
+    )
+
+    print_console_report(analyzed, comparator, min_ratio=0.01)
+
+    output = capsys.readouterr().out
+    assert "Feature: liga" in output
+    assert "Feature: smcp" not in output
+
+
+@pytest.mark.parametrize("option", [[], ["--hide-subtle"]])
+def test_main_writes_reports(test_font, tmp_path, monkeypatch, capsys, option):
+    report = tmp_path / "report.pdf"
+    monkeypatch.setattr(
+        "sys.argv", ["opentype-features", str(test_font), "-o", str(report), *option]
+    )
+
+    main()
+
+    assert (
+        "Feature: liga (Standard Ligatures), on by default" in capsys.readouterr().out
+    )
+    assert report.stat().st_size > 0

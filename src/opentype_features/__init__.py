@@ -42,6 +42,7 @@ CELL_LABEL_HEIGHT = 3
 # Visual Difference Thresholds
 DIFF_THRESHOLD_NONE = 0.0001  # Technical but no visual difference
 DIFF_THRESHOLD_SMALL = 0.1  # Subtle visual difference
+SUBTLE_RATIO = 0.01  # Relative difference hidden by --hide-subtle
 RENDER_CACHE_SIZE = 1024
 
 # Applied by script-specific shapers depending on the context, e.g. Arabic joining
@@ -1152,10 +1153,23 @@ def _render_feature(
         pdf.set_y(y + 5)
 
 
-def print_console_report(analyzer: FontAnalyzer) -> None:
-    """Print a summary of OpenType features to the console."""
+def print_console_report(
+    analyzer: FontAnalyzer,
+    comparator: VisualComparator | None = None,
+    min_ratio: float = 0.0,
+) -> None:
+    """
+    Print a summary of OpenType features to the console.
+
+    With a comparator, substitutions without a relative visual difference of at
+    least min_ratio are left out.
+    """
     for tag in sorted(analyzer.feature_substitutions.keys()):
         subs = analyzer.feature_substitutions[tag]
+        if comparator:
+            subs = score_substitutions(subs, comparator, min_ratio)
+            if not subs:
+                continue
         print(f"\nFeature: {analyzer.get_feature_heading(tag)}")
         for sub in subs:
             variant_label = analyzer.get_variant_label(sub)
@@ -1184,7 +1198,15 @@ def main() -> None:
         default=0.0,
         help="Skip glyph pairs with ratio diff score below this value (default: 0.0)",
     )
+    parser.add_argument(
+        "--hide-subtle",
+        action="store_true",
+        help=f"Skip glyph pairs with ratio diff score below {SUBTLE_RATIO}",
+    )
     args = parser.parse_args()
+    min_ratio = (
+        max(args.min_ratio, SUBTLE_RATIO) if args.hide_subtle else args.min_ratio
+    )
     logging.basicConfig(format="%(levelname)s: %(message)s")
     logging.captureWarnings(capture=True)
 
@@ -1202,11 +1224,12 @@ def main() -> None:
 
     actual_font_path = analyzer.create_modified_font()
     try:
-        analyzer.detect_default_features(VisualComparator(actual_font_path))
+        comparator = VisualComparator(actual_font_path)
+        analyzer.detect_default_features(comparator)
 
         print(f"Analyzing font: {font_path}")
         print("-" * 40)
-        print_console_report(analyzer)
+        print_console_report(analyzer, comparator if min_ratio else None, min_ratio)
 
         if args.output:
             render_pdf_report(
@@ -1214,7 +1237,7 @@ def main() -> None:
                 Path(args.output),
                 actual_font_path,
                 show_diff=not args.no_diff,
-                min_ratio=args.min_ratio,
+                min_ratio=min_ratio,
             )
     finally:
         if actual_font_path != font_path and actual_font_path.exists():
