@@ -103,7 +103,7 @@ def render_pdf_report(
     actual_font_path: Path,
     comparator: VisualComparator,
     show_diff: bool = False,
-    hide_aalt_only: bool = False,
+    aalt_only: bool = False,
 ) -> None:
     """Write a PDF report of the examples of each feature."""
     family = analyzer.get_name(16) or analyzer.get_name(1) or analyzer.font_path.stem
@@ -139,7 +139,7 @@ def render_pdf_report(
                 examples_by_tag[tag],
                 show_diff,
                 links[tag],
-                hide_aalt_only,
+                aalt_only,
             )
         except Exception:
             logger.exception("Could not render feature %s", tag)
@@ -257,7 +257,7 @@ def _render_feature(
     examples: list[FeatureExample],
     show_diff: bool,
     link: int,
-    hide_aalt_only: bool = False,
+    aalt_only: bool = False,
 ) -> None:
     """Render the heading and example tiles of a single feature."""
     rows = _layout_rows(pdf, analyzer, examples)
@@ -273,11 +273,15 @@ def _render_feature(
     pdf.cell(pdf.get_string_width(name) + 2, HEADING_HEIGHT - 2, name)
     if badge := _default_badge(analyzer, tag):
         _render_badge(pdf, *badge, x=pdf.get_x(), y=pdf.get_y() + 2)
-    if notes := feature_notes(analyzer, tag, examples, hide_aalt_only):
+    if notes := feature_notes(analyzer, tag, examples, aalt_only):
         pdf.set_ui_font("", 7)
         pdf.set_text_color(*MUTED)
-        pdf.set_x(MARGIN)
-        pdf.cell(CONTENT_WIDTH, HEADING_HEIGHT - 2, " · ".join(notes), align="R")
+        heading_end = pdf.get_x() + 3
+        width = MARGIN + CONTENT_WIDTH - heading_end
+        pdf.set_x(heading_end)
+        pdf.cell(
+            width, HEADING_HEIGHT - 2, _fit(pdf, " · ".join(notes), width), align="R"
+        )
     pdf.set_y(pdf.get_y() + HEADING_HEIGHT - 2)
 
     y = pdf.get_y()

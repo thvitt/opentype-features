@@ -13,14 +13,14 @@ def in_tmp_path(tmp_path, monkeypatch):
     return tmp_path
 
 
-def _summary_text(analyzer, examples, report_path, hide_aalt_only=False):
+def _summary_text(analyzer, examples, report_path, aalt_only=False):
     console = Console(record=True, width=200)
-    console.print(summarize(analyzer, examples, report_path, hide_aalt_only))
+    console.print(summarize(analyzer, examples, report_path, aalt_only))
     return console.export_text()
 
 
 @pytest.mark.parametrize(
-    "options", [[], ["--hide-subtle"], ["--diff"], ["--hide-aalt-only"]]
+    "options", [[], ["--hide-subtle"], ["--diff"], ["--aalt-only"]]
 )
 def test_report_writes_pdf_next_to_working_directory(test_font, in_tmp_path, options):
     app([str(test_font), *options], result_action="return_value")
@@ -92,16 +92,15 @@ def test_summary_notes_aalt_only_alternates(test_font, in_tmp_path):
     shown = _summary_text(analyzer, collect_examples(analyzer, comparator), None)
     hidden = _summary_text(
         analyzer,
-        collect_examples(analyzer, comparator, hide_aalt_only=True),
+        collect_examples(analyzer, comparator, aalt_only=True),
         None,
-        hide_aalt_only=True,
+        aalt_only=True,
     )
 
-    assert "1 only reachable via aalt (outlined)" in shown
-    assert "1 only reachable via aalt hidden" in hidden
-    assert "invisible" not in next(
-        line for line in hidden.splitlines() if " aalt " in line
-    )
+    aalt_row = next(line for line in hidden.splitlines() if " aalt " in line)
+    assert "1 aalt only (outlined)" in shown
+    assert "also in other features" in aalt_row
+    assert "invisible" not in aalt_row
 
 
 @pytest.fixture

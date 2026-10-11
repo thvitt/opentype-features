@@ -37,7 +37,7 @@ def report(
     diff: bool = False,
     min_ratio: float = 0.0,
     hide_subtle: Annotated[bool, Parameter(negative=())] = False,
-    hide_aalt_only: Annotated[bool, Parameter(negative=())] = False,
+    aalt_only: Annotated[bool, Parameter(negative=())] = False,
 ) -> None:
     """
     Analyze the OpenType features of a font and write a PDF report.
@@ -48,7 +48,7 @@ def report(
         diff: add a picture of the pixel difference to each example
         min_ratio: hide examples whose relative visual difference is smaller
         hide_subtle: hide examples whose relative visual difference is below 1%
-        hide_aalt_only: hide alternates of aalt that no other feature reaches
+        aalt_only: show only those alternates of aalt that no other feature reaches
 
     """
     if hide_subtle:
@@ -61,7 +61,7 @@ def report(
     with analyzer.modified_font() as actual_font_path:
         comparator = VisualComparator(actual_font_path)
         analyzer.detect_default_features(comparator)
-        examples = collect_examples(analyzer, comparator, min_ratio, hide_aalt_only)
+        examples = collect_examples(analyzer, comparator, min_ratio, aalt_only)
         try:
             render_pdf_report(
                 analyzer,
@@ -70,22 +70,20 @@ def report(
                 actual_font_path,
                 comparator,
                 show_diff=diff,
-                hide_aalt_only=hide_aalt_only,
+                aalt_only=aalt_only,
             )
         except Exception:
             logger.exception("Could not write the PDF report %s", output)
             written = False
 
-    console.print(
-        summarize(analyzer, examples, output if written else None, hide_aalt_only)
-    )
+    console.print(summarize(analyzer, examples, output if written else None, aalt_only))
 
 
 def summarize(
     analyzer: FontAnalyzer,
     examples_by_tag: dict[str, list[FeatureExample]],
     report_path: Path | None,
-    hide_aalt_only: bool = False,
+    aalt_only: bool = False,
 ) -> Group:
     """Summarize the findings per feature."""
     table = Table(title=f"OpenType features of {analyzer.font_path.name}")
@@ -104,7 +102,7 @@ def summarize(
             _default_status(analyzer, tag),
             str(len(examples)),
             str(found),
-            "; ".join(feature_notes(analyzer, tag, examples, hide_aalt_only)),
+            "; ".join(feature_notes(analyzer, tag, examples, aalt_only)),
             style=None if examples else "dim",
         )
 

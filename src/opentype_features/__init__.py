@@ -1099,7 +1099,7 @@ def collect_examples(
     analyzer: FontAnalyzer,
     comparator: VisualComparator,
     min_ratio: float = 0.0,
-    hide_aalt_only: bool = False,
+    aalt_only: bool = False,
 ) -> dict[str, list[FeatureExample]]:
     """Return the visible examples per feature, grouped and in report order."""
     return {
@@ -1108,7 +1108,7 @@ def collect_examples(
                 [
                     example
                     for example in analyzer.feature_examples[tag]
-                    if not (hide_aalt_only and example.aalt_only)
+                    if not (aalt_only and tag == "aalt" and not example.aalt_only)
                 ],
                 comparator,
                 min_ratio,
@@ -1122,22 +1122,24 @@ def feature_notes(
     analyzer: FontAnalyzer,
     tag: str,
     examples: list[FeatureExample],
-    hide_aalt_only: bool = False,
+    aalt_only: bool = False,
 ) -> list[str]:
     """Describe which of the feature's examples are not shown individually."""
     notes = []
     if total := analyzer.positioning_totals.get(tag):
         notes.append(f"{MAX_POSITIONING_EXAMPLES} strongest of {total} positionings")
     all_examples = analyzer.feature_examples[tag]
-    aalt_only_hidden = sum(e.aalt_only for e in all_examples) if hide_aalt_only else 0
-    if aalt_only_hidden:
-        notes.append(f"{aalt_only_hidden} only reachable via aalt hidden")
+    reachable_elsewhere = (
+        sum(not e.aalt_only for e in all_examples) if aalt_only and tag == "aalt" else 0
+    )
+    if reachable_elsewhere:
+        notes.append(f"{reachable_elsewhere} also in other features")
     if aalt_only_shown := sum(
         1 + len(e.input_variants) for e in examples if e.aalt_only
     ):
-        notes.append(f"{aalt_only_shown} only reachable via aalt (outlined)")
+        notes.append(f"{aalt_only_shown} aalt only (outlined)")
     shown_inputs = sum(1 + len(e.input_variants) for e in examples)
-    if hidden := len(all_examples) - aalt_only_hidden - shown_inputs:
+    if hidden := len(all_examples) - reachable_elsewhere - shown_inputs:
         notes.append(f"{hidden} invisible or too subtle")
     if folded := sum(len(e.input_variants) for e in examples):
         notes.append(f"{folded} similar inputs folded")

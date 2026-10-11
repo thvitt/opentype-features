@@ -468,13 +468,13 @@ def test_aalt_alternates_of_other_features_are_not_marked(analyzed):
     )
 
 
-def test_hide_aalt_only(analyzed):
+def test_aalt_only_shows_only_exclusive_alternates(analyzed):
     comparator = VisualComparator(analyzed.font_path)
 
-    examples = collect_examples(analyzed, comparator, hide_aalt_only=True)
+    examples = collect_examples(analyzed, comparator, aalt_only=True)
 
-    assert examples["aalt"]
-    assert not any(example.aalt_only for example in examples["aalt"])
+    assert [example.output_glyphs for example in examples["aalt"]] == ["c.swsh"]
+    assert examples["salt"] == collect_examples(analyzed, comparator)["salt"]
 
 
 def test_controls_and_surrogates_are_not_used_as_characters(test_font, tmp_path):
