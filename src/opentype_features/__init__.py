@@ -13,6 +13,7 @@ from fontFeatures import Chaining
 from fontFeatures import Substitution as FFSubstitution
 from fontFeatures.ttLib import unparse
 from fontTools.ttLib import TTFont
+from fontTools.ttLib.tables._c_m_a_p import CmapSubtable
 from fpdf import FPDF
 from PIL import Image, ImageDraw, ImageFont
 
@@ -607,26 +608,20 @@ class FontAnalyzer:
             return self.font_path
 
         font_copy = TTFont(str(self.font_path))
+        pua_cmap = {ord(char): name for name, char in self.pua_map.items()}
+        full_cmap = (font_copy.getBestCmap() or {}) | pua_cmap
 
-        format_4 = 4
-        format_12 = 12
-        max_char_format_4 = 0xFFFF
+        # The PUA lies beyond the BMP, which only a format 12 subtable can address
+        cmap_table = font_copy["cmap"]
+        cmap_table.tables = [t for t in cmap_table.tables if t.format != 12]  # noqa: PLR2004
+        subtable = CmapSubtable.newSubtable(12)
+        subtable.platformID, subtable.platEncID, subtable.language = 3, 10, 0
+        subtable.cmap = full_cmap
+        cmap_table.tables.append(subtable)
 
-        has_format_12 = any(t.format == format_12 for t in font_copy["cmap"].tables)
-        if not has_format_12:
-            print(
-                "Warning: Font lacks a format 12 cmap. Some PUA characters may not render."
-            )
-
-        for table in font_copy["cmap"].tables:
-            if table.isUnicode():
-                for name, char in self.pua_map.items():
-                    # Format 4 can only handle up to 0xFFFF
-                    if table.format == format_4 and ord(char) > max_char_format_4:
-                        continue
-                    table.cmap[ord(char)] = name
-
-        with tempfile.NamedTemporaryFile(suffix=".ttf", delete=False) as tmp:
+        with tempfile.NamedTemporaryFile(
+            suffix=self.font_path.suffix, delete=False
+        ) as tmp:
             temp_path = Path(tmp.name)
         font_copy.save(str(temp_path))
         return temp_path
@@ -1010,7 +1005,7 @@ def render_pdf_report(
 
     supported = analyzer.get_supported_features()
     fig_tags = {"lnum", "onum", "pnum", "tnum"}
-    comparator = VisualComparator(analyzer.font_path)
+    comparator = VisualComparator(actual_font_path)
 
     y = pdf.get_y()
     if supported & fig_tags:

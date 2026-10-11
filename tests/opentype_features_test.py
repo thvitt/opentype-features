@@ -3,6 +3,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from fontFeatures import Substitution as FFSubstitution
+from fontTools.ttLib import TTFont
 
 from opentype_features import (
     PUA_START,
@@ -11,6 +12,7 @@ from opentype_features import (
     VisualComparator,
     get_feature_priority,
     is_character_variant,
+    render_pdf_report,
     score_substitutions,
     shaping_language,
 )
@@ -270,3 +272,33 @@ def test_shaping_language():
     assert shaping_language(()) is None
     assert shaping_language(("DFLT/dflt", "latn/TRK")) is None
     assert shaping_language(("latn/CAT", "latn/TRK")) == "x-hbotCAT"
+
+
+def test_modified_font_maps_unencoded_glyphs(analyzed):
+    modified = analyzed.create_modified_font()
+    try:
+        cmap = TTFont(modified).getBestCmap() or {}
+        assert cmap[ord(analyzed.pua_map["a.sc"])] == "a.sc"
+        assert cmap[ord("a")] == "a"
+        assert _scored(analyzed, "ss01", modified)
+    finally:
+        modified.unlink()
+
+
+def test_pdf_report_compares_with_modified_font(analyzed, tmp_path, monkeypatch):
+    used_paths = []
+
+    class RecordingComparator(VisualComparator):
+        def __init__(self, font_path):
+            used_paths.append(font_path)
+            super().__init__(font_path)
+
+    monkeypatch.setattr("opentype_features.VisualComparator", RecordingComparator)
+    modified = analyzed.create_modified_font()
+    try:
+        render_pdf_report(analyzed, tmp_path / "report.pdf", modified)
+    finally:
+        modified.unlink()
+
+    assert used_paths == [modified]
+    assert (tmp_path / "report.pdf").stat().st_size > 0
