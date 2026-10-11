@@ -54,33 +54,25 @@ def test_get_display_name_generic_without_unicode(analyzer):
     assert analyzer.get_display_name("glyph1234") == "glyph1234"
 
 
-def test_get_glyph_info_with_unicode(analyzer):
-    """Test get_glyph_info for a glyph present in reverse_cmap."""
+def test_get_char_with_unicode(analyzer):
+    """Test get_char for a glyph present in reverse_cmap."""
     analyzer.reverse_cmap = {"Aogonek": 0x0104}
-    char, name = analyzer.get_glyph_info("Aogonek")
-    assert char == chr(0x0104)
-    assert name == "Aogonek"
+    assert analyzer.get_char("Aogonek") == chr(0x0104)
     assert not analyzer.pua_map  # PUA map should not be updated
 
 
-def test_get_glyph_info_without_unicode(analyzer):
-    """Test get_glyph_info for a glyph without Unicode mapping, using PUA."""
+def test_get_char_without_unicode(analyzer):
+    """Test get_char for a glyph without Unicode mapping, using PUA."""
     analyzer.reverse_cmap = {}
 
-    char1, name1 = analyzer.get_glyph_info("glyph00499")
-    assert char1 == chr(PUA_START)
-    assert name1 == "glyph00499"
+    assert analyzer.get_char("glyph00499") == chr(PUA_START)
     assert analyzer.pua_map["glyph00499"] == chr(PUA_START)
 
-    char2, name2 = analyzer.get_glyph_info("glyph00500")
-    assert char2 == chr(PUA_START + 1)
-    assert name2 == "glyph00500"
+    assert analyzer.get_char("glyph00500") == chr(PUA_START + 1)
     assert analyzer.pua_map["glyph00500"] == chr(PUA_START + 1)
 
     # Second call for the same glyph should return the same PUA character
-    char3, name3 = analyzer.get_glyph_info("glyph00499")
-    assert char3 == chr(PUA_START)
-    assert name3 == "glyph00499"
+    assert analyzer.get_char("glyph00499") == chr(PUA_START)
 
 
 def test_get_tag_name(analyzer):
@@ -148,38 +140,6 @@ def test_get_figure_chars(analyzer):
     assert chars == "0123456789%a"
     assert "x" not in chars
     assert chr(PUA_START) not in chars
-
-
-def test_substitution_has_one_to_one_chars():
-    """Test the has_one_to_one_chars property of Substitution."""
-    # 1-to-1 mapping
-    # Note: input_chars/output_chars represent the character sequences
-    sub1 = Substitution("A", "A", "A.alt", "A", "salt", diff_total=1.0, diff_ratio=1.0)
-    assert sub1.has_one_to_one_chars
-
-    # Many-to-1 mapping (ligature)
-    sub2 = Substitution(
-        "f f i", "ffi", "ffi.liga", "ﬁ", "liga", diff_total=1.0, diff_ratio=1.0
-    )
-    assert not sub2.has_one_to_one_chars
-
-    # 1-to-many mapping (multiple substitution)
-    sub3 = Substitution(
-        "ffi.liga", "ﬁ", "f f i", "ffi", "ccmp", diff_total=1.0, diff_ratio=1.0
-    )
-    assert not sub3.has_one_to_one_chars
-
-    # PUA mapping (still 1-to-1)
-    sub4 = Substitution(
-        "glyph00499",
-        "\ue000",
-        "glyph00499.alt",
-        "\ue001",
-        "salt",
-        diff_total=1.0,
-        diff_ratio=1.0,
-    )
-    assert sub4.has_one_to_one_chars
 
 
 @pytest.fixture
@@ -380,3 +340,10 @@ def test_analysis_skips_failing_rules(analyzer, monkeypatch, caplog):
 
     assert analyzer.feature_substitutions == {}
     assert "Skipping a rule of feature liga" in caplog.text
+
+
+def test_pdf_report_without_diff(analyzed, tmp_path, recwarn):
+    render_pdf_report(analyzed, tmp_path / "report.pdf", analyzed.font_path, False)
+
+    assert (tmp_path / "report.pdf").stat().st_size > 0
+    assert not [w for w in recwarn if issubclass(w.category, DeprecationWarning)]

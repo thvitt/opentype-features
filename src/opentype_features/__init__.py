@@ -6,7 +6,7 @@ import sys
 import tempfile
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 import uharfbuzz as hb
@@ -15,7 +15,7 @@ from fontFeatures import Substitution as FFSubstitution
 from fontFeatures.ttLib import unparse
 from fontTools.ttLib import TTFont
 from fontTools.ttLib.tables._c_m_a_p import CmapSubtable
-from fpdf import FPDF
+from fpdf import FPDF, XPos, YPos
 from PIL import Image, ImageDraw, ImageFont
 
 from opentype_features.feature_names import FEATURE_NAMES, LANGUAGE_NAMES
@@ -35,7 +35,8 @@ PUA_START = 0xF0000
 PAGE_BREAK_THRESHOLD = 250
 ROW_HEIGHT = 8
 PAGE_BOTTOM_MARGIN = 275
-COLUMN_RENDER_WIDTH = 15
+ROW_LABEL_WIDTH = 15
+CELL_LABEL_HEIGHT = 3
 
 # Visual Difference Thresholds
 DIFF_THRESHOLD_NONE = 0.0001  # Technical but no visual difference
@@ -58,11 +59,6 @@ class Substitution:
     diff_total: float = 1.0
     diff_ratio: float = 1.0
     feature_value: int = 1
-
-    @property
-    def has_one_to_one_chars(self) -> bool:
-        """Check if this is a 1-to-1 character mapping."""
-        return len(self.input_chars) == 1 and len(self.output_chars) == 1
 
 
 class VisualComparator:
@@ -399,16 +395,15 @@ class FontAnalyzer:
             _script, tag = lang_tag.split("/")
         return LANGUAGE_NAMES.get(tag, tag)
 
-    def get_glyph_info(self, glyph_name: str) -> tuple[str, str]:
-        """Return the character and glyph name for a given glyph name."""
+    def get_char(self, glyph_name: str) -> str:
+        """Return the character rendering a glyph, assigning a PUA one if unmapped."""
         if glyph_name in self.reverse_cmap:
-            return chr(self.reverse_cmap[glyph_name]), glyph_name
+            return chr(self.reverse_cmap[glyph_name])
 
         if glyph_name not in self.pua_map:
-            pua_char = chr(PUA_START + len(self.pua_map))
-            self.pua_map[glyph_name] = pua_char
+            self.pua_map[glyph_name] = chr(PUA_START + len(self.pua_map))
 
-        return self.pua_map[glyph_name], glyph_name
+        return self.pua_map[glyph_name]
 
     def get_display_name(self, glyph_name: str) -> str:
         """Generate a display name for a glyph following user rules."""
@@ -557,8 +552,8 @@ class FontAnalyzer:
         feature_value: int = 1,
     ) -> None:
         """Add or combine a substitution in the result map."""
-        in_chars = "".join(self.get_glyph_info(g)[0] for g in in_glyphs)
-        out_chars = "".join(self.get_glyph_info(g)[0] for g in out_glyphs)
+        in_chars = "".join(self.get_char(g) for g in in_glyphs)
+        out_chars = "".join(self.get_char(g) for g in out_glyphs)
         key = (tag, in_chars, out_chars)
         if key not in result_map:
             result_map[key] = Substitution(
@@ -603,7 +598,6 @@ class FontAnalyzer:
 def _render_compact_table(
     pdf: FPDF,
     subs: list[Substitution],
-    tag: str,
     y: float,
     analyzer: FontAnalyzer,
     comparator: VisualComparator,
@@ -611,66 +605,28 @@ def _render_compact_table(
 ) -> float:
     """Render mappings in a compact horizontal table."""
     max_width = 190
-    label_width = 15
 
     i = 0
     while i < len(subs):
-        chunk, i = _get_next_sub_chunk(subs, i, max_width - label_width)
-        if not chunk:
-            break
+        chunk, i = _get_next_sub_chunk(subs, i, max_width - ROW_LABEL_WIDTH)
+        cell_labels = [analyzer.get_cell_label(sub) for sub, _width in chunk]
+        has_labels = any(cell_labels)
 
-        # Check if we need a page break
         rows_to_render = 3 if show_diff else 2
-        total_chunk_height = rows_to_render * ROW_HEIGHT + 5
-
-        # Extra height for labels if needed
-        if any(analyzer.get_cell_label(s) for s, w in chunk):
-            total_chunk_height += 3
+        total_chunk_height = rows_to_render * ROW_HEIGHT + 4
+        if has_labels:
+            total_chunk_height += CELL_LABEL_HEIGHT
 
         if y + total_chunk_height > PAGE_BOTTOM_MARGIN:
             pdf.add_page()
             y = 15
 
-        y = _render_chunk_row(
-            pdf,
-            chunk,
-            "off",
-            False,
-            tag,
-            y,
-            label_width,
-            analyzer,
-            comparator,
-            mode="off",
-            show_diff=show_diff,
-        )
-        y = _render_chunk_row(
-            pdf,
-            chunk,
-            "on",
-            True,
-            tag,
-            y,
-            label_width,
-            analyzer,
-            comparator,
-            mode="on",
-            show_diff=show_diff,
-        )
+        y = _render_chunk_row(pdf, chunk, "off", y, comparator, show_diff)
+        if has_labels:
+            y = _render_cell_labels(pdf, chunk, cell_labels, y)
+        y = _render_chunk_row(pdf, chunk, "on", y, comparator, show_diff)
         if show_diff:
-            y = _render_chunk_row(
-                pdf,
-                chunk,
-                "diff",
-                True,
-                tag,
-                y,
-                label_width,
-                analyzer,
-                comparator,
-                mode="diff",
-                show_diff=show_diff,
-            )
+            y = _render_chunk_row(pdf, chunk, "diff", y, comparator, show_diff)
         y += 4  # Padding between chunks
 
     return y
@@ -701,25 +657,21 @@ def _get_next_sub_chunk(
 def _render_chunk_row(
     pdf: FPDF,
     chunk: list[tuple[Substitution, float]],
-    label: str,
-    shaping: bool,
-    tag: str,
+    mode: Literal["off", "on", "diff"],
     y: float,
-    label_width: float,
-    analyzer: FontAnalyzer,
     comparator: VisualComparator,
-    mode: str = "off",
-    show_diff: bool = True,
+    show_diff: bool,
 ) -> float:
     """Render a single row (off, on, or diff) for a chunk of substitutions."""
     pdf.set_xy(10, y)
     pdf.set_text_color(120)
     pdf.set_font("Helvetica", "I", 7)
-    pdf.cell(label_width, ROW_HEIGHT, f"{label}:", align="L")
+    pdf.cell(ROW_LABEL_WIDTH, ROW_HEIGHT, f"{mode}:", align="L")
 
     pdf.set_font("TargetFont", "", 10)
 
     for sub, width in chunk:
+        tag = sub.feature_tag
         x_pos = pdf.get_x()
         if mode == "diff":
             # Render diff bitmap ONLY in diff mode
@@ -792,36 +744,36 @@ def _render_chunk_row(
             pdf.set_text_shaping(use_shaping_engine=False)
             pdf.cell(width, ROW_HEIGHT, sub.input_chars, align="C")
 
-        if mode == "on" and (cell_label := analyzer.get_cell_label(sub)):
-            _draw_cell_label(pdf, x_pos, y, width, cell_label)
-
     return y + ROW_HEIGHT
 
 
-def _draw_cell_label(pdf: FPDF, x: float, y: float, width: float, text: str) -> None:
-    """Draw a small label above a substitution, e.g. its languages or variant."""
-    pdf.set_xy(x, y)
+def _render_cell_labels(
+    pdf: FPDF, chunk: list[tuple[Substitution, float]], labels: list[str], y: float
+) -> float:
+    """Render small labels above the substitutions, e.g. their languages or variant."""
     label_size = 4
-    pdf.set_font("Helvetica", "I", label_size)
-    text_width = pdf.get_string_width(text)
-    if text_width > width - 1:
-        pdf.set_font_size(label_size * (width - 1) / text_width)
     pdf.set_text_color(150)
-    pdf.cell(width, 2, text, align="C")
-    # Position will be restored by the caller if needed, but we mostly care about text flow
-    pdf.set_xy(x + width, y)
-    pdf.set_font("TargetFont", "", 10)
+    x: float = 10 + ROW_LABEL_WIDTH
+    for (_sub, width), text in zip(chunk, labels, strict=True):
+        pdf.set_font("Helvetica", "I", label_size)
+        text_width = pdf.get_string_width(text)
+        if text_width > width - 1:
+            pdf.set_font_size(label_size * (width - 1) / text_width)
+        pdf.set_xy(x, y)
+        pdf.cell(width, CELL_LABEL_HEIGHT, text, align="C")
+        x += width
     pdf.set_text_color(0)
+    return y + CELL_LABEL_HEIGHT
 
 
 def _render_figures_section(
-    pdf: FPDF, analyzer: FontAnalyzer, supported: set[str], y: float
+    pdf: FPDF, analyzer: FontAnalyzer, supported: set[str]
 ) -> float:
     """Render a combined section for figure feature combinations."""
     pdf.start_section("Figures", level=0)
     pdf.set_font("Helvetica", "B", 12)
     pdf.set_text_color(0)
-    pdf.cell(0, 10, "Figures", ln=True)
+    pdf.cell(0, 10, "Figures", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
     y = pdf.get_y()
 
     fig_chars = analyzer.get_figure_chars()
@@ -1031,7 +983,13 @@ def render_pdf_report(
     try:
         pdf.add_font("TargetFont", style="", fname=str(actual_font_path))
         pdf.set_font("Helvetica", "B", 16)
-        pdf.cell(0, 10, f"OpenType Feature Report: {analyzer.font_path.name}", ln=True)
+        pdf.cell(
+            0,
+            10,
+            f"OpenType Feature Report: {analyzer.font_path.name}",
+            new_x=XPos.LMARGIN,
+            new_y=YPos.NEXT,
+        )
         pdf.ln(5)
     except Exception:
         logger.exception("Could not embed %s in the PDF report", actual_font_path)
@@ -1041,9 +999,8 @@ def render_pdf_report(
     fig_tags = {"lnum", "onum", "pnum", "tnum"}
     comparator = VisualComparator(actual_font_path)
 
-    y = pdf.get_y()
     if supported & fig_tags:
-        y = _render_figures_section(pdf, analyzer, supported, y)
+        y = _render_figures_section(pdf, analyzer, supported)
         pdf.set_y(y)
 
     remaining_tags = sorted(
@@ -1085,10 +1042,16 @@ def _render_feature(
         pdf.start_section(f"{tag}: {friendly_name}", level=0)
         pdf.set_font("Helvetica", "B", 12)
         pdf.set_text_color(0)
-        pdf.cell(0, 10, f"Feature: {tag} ({friendly_name})", ln=True)
+        pdf.cell(
+            0,
+            10,
+            f"Feature: {tag} ({friendly_name})",
+            new_x=XPos.LMARGIN,
+            new_y=YPos.NEXT,
+        )
 
         y = _render_compact_table(
-            pdf, subs, tag, pdf.get_y(), analyzer, comparator, show_diff=show_diff
+            pdf, subs, pdf.get_y(), analyzer, comparator, show_diff=show_diff
         )
         pdf.set_y(y + 5)
 
