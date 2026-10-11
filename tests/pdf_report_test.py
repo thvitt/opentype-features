@@ -5,6 +5,7 @@ from opentype_features.pdf_report import (
     TILE_GAP,
     ReportPDF,
     _layout_rows,
+    _render_characters,
     _render_feature,
     render_pdf_report,
 )
@@ -73,3 +74,15 @@ def test_report_with_non_latin_feature_names(analyzed, tmp_path):
     )
 
     assert (tmp_path / "report.pdf").stat().st_size > 0
+
+
+def test_character_table_gets_its_own_section(analyzed, monkeypatch):
+    pdf = _pdf(analyzed.font_path)
+    sections = []
+    monkeypatch.setattr(
+        pdf, "start_section", lambda name, **_: sections.append((name, pdf.page))
+    )
+
+    _render_characters(pdf, analyzed)
+
+    assert sections == [("Characters", 2)]

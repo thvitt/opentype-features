@@ -57,6 +57,7 @@ class ReportOptions:
     show_diff: bool
     min_ratio: float
     aalt_only: bool
+    show_characters: bool
 
 
 @app.default
@@ -70,6 +71,7 @@ def report(
     min_ratio: float = 0.0,
     hide_subtle: Annotated[bool, Parameter(negative=())] = False,
     aalt_only: Annotated[bool, Parameter(negative=())] = False,
+    characters: Annotated[bool, Parameter(negative=())] = False,
 ) -> int:
     """
     Analyze the OpenType features of fonts and write a PDF report for each.
@@ -82,6 +84,7 @@ def report(
         min_ratio: hide examples whose relative visual difference is smaller
         hide_subtle: hide examples whose relative visual difference is below 1%
         aalt_only: show only those alternates of aalt that no other feature reaches
+        characters: add a table of all Unicode characters the font maps
 
     Returns:
         1 if a font could not be analyzed, else 0
@@ -89,7 +92,7 @@ def report(
     """
     if hide_subtle:
         min_ratio = max(min_ratio, SUBTLE_RATIO)
-    options = ReportOptions(diff, min_ratio, aalt_only)
+    options = ReportOptions(diff, min_ratio, aalt_only, characters)
     pdf_paths = report_paths(fonts, output)
     tsv = tsv or pdf_paths[0].parent / SUMMARY_TABLE_NAME
     failed = False
@@ -222,6 +225,7 @@ def _write_pdf(
             comparator,
             show_diff=options.show_diff,
             aalt_only=options.aalt_only,
+            show_characters=options.show_characters,
             on_feature=on_feature,
         )
     except Exception:

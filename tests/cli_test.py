@@ -35,7 +35,7 @@ def _summary_text(analyzer, examples, report_path, aalt_only=False):
 
 
 @pytest.mark.parametrize(
-    "options", [[], ["--hide-subtle"], ["--diff"], ["--aalt-only"]]
+    "options", [[], ["--hide-subtle"], ["--diff"], ["--aalt-only"], ["--characters"]]
 )
 def test_report_writes_pdf_next_to_working_directory(test_font, in_tmp_path, options):
     app([str(test_font), *options], result_action="return_value")

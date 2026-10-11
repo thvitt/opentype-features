@@ -41,6 +41,10 @@ LABEL_SIZE = 5
 LABEL_LINE = 2.6
 DIFF_HEIGHT = 6
 FIGURE_LABEL_WIDTH = 62
+CHARS_PER_ROW = 16
+CHAR_LABEL_WIDTH = 14
+CHAR_CELL_HEIGHT = 9.5
+CHAR_CODE_SIZE = 4
 
 # Unicode fonts for everything but the examples
 FONT_DIR = Path(__file__).parent / "fonts"
@@ -106,6 +110,7 @@ def render_pdf_report(
     comparator: VisualComparator,
     show_diff: bool = False,
     aalt_only: bool = False,
+    show_characters: bool = False,
     on_feature: Callable[[], object] | None = None,
 ) -> None:
     """Write a PDF report of the examples of each feature."""
@@ -146,6 +151,9 @@ def render_pdf_report(
                 logger.exception("Could not render feature %s", tag)
         if on_feature:
             on_feature()
+
+    if show_characters:
+        _render_characters(pdf, analyzer)
 
     pdf.output(str(output_path))
 
@@ -250,6 +258,72 @@ def _render_figures(
         )
         pdf.cell(0, row_height, digits, new_x="LMARGIN", new_y="NEXT")
     pdf.ln(4)
+
+
+def _render_characters(pdf: ReportPDF, analyzer: FontAnalyzer) -> None:
+    """Render a code chart of the characters the font maps, 16 to a row."""
+    codepoints = sorted((analyzer.font.getBestCmap() or {}).keys())
+    rows: dict[int, set[int]] = {}
+    for codepoint in codepoints:
+        rows.setdefault(codepoint // CHARS_PER_ROW, set()).add(codepoint)
+
+    pdf.add_page()
+    pdf.start_section("Characters", level=0)
+    _render_tag_pill(pdf, "chars")
+    pdf.set_ui_font("B", 11)
+    pdf.set_text_color(*TEXT)
+    pdf.cell(40, HEADING_HEIGHT - 2, "Characters")
+    pdf.set_ui_font("", 7)
+    pdf.set_text_color(*MUTED)
+    pdf.cell(0, HEADING_HEIGHT - 2, f"{len(codepoints)} encoded characters", align="R")
+    pdf.set_y(pdf.get_y() + HEADING_HEIGHT)
+
+    cell_width = (CONTENT_WIDTH - CHAR_LABEL_WIDTH) / CHARS_PER_ROW
+    for row, row_codepoints in rows.items():
+        if pdf.get_y() + CHAR_CELL_HEIGHT > PAGE_BOTTOM:
+            pdf.add_page()
+        y = pdf.get_y()
+        pdf.set_xy(MARGIN, y)
+        pdf.set_font(TAG_FONT, "B", 6)
+        pdf.set_text_color(*MUTED)
+        pdf.cell(CHAR_LABEL_WIDTH, CHAR_CELL_HEIGHT, f"{row:03X}x")
+        for column in range(CHARS_PER_ROW):
+            codepoint = row * CHARS_PER_ROW + column
+            if codepoint in row_codepoints:
+                x = MARGIN + CHAR_LABEL_WIDTH + column * cell_width
+                _render_character(pdf, codepoint, x, y, cell_width)
+        pdf.set_y(y + CHAR_CELL_HEIGHT + TILE_GAP / 2)
+
+
+def _render_character(
+    pdf: ReportPDF, codepoint: int, x: float, y: float, width: float
+) -> None:
+    """Render a character in the font above its code point."""
+    tile_width = width - TILE_GAP / 2
+    pdf.set_fill_color(*TILE)
+    pdf.rect(
+        x,
+        y,
+        tile_width,
+        CHAR_CELL_HEIGHT,
+        style="F",
+        round_corners=True,
+        corner_radius=1,
+    )
+    char = chr(codepoint)
+    if unicodedata.category(char) not in {"Cc", "Cs"}:
+        pdf.set_font("TargetFont", "", GLYPH_SIZE)
+        pdf.set_text_shaping(use_shaping_engine=False)
+        available = tile_width - 2 * TILE_PADDING
+        if (glyph_width := pdf.get_string_width(char)) > available:
+            pdf.set_font_size(GLYPH_SIZE * available / glyph_width)
+        pdf.set_text_color(*TEXT)
+        pdf.set_xy(x, y + TILE_PADDING / 2)
+        pdf.cell(tile_width, GLYPH_LINE, char, align="C")
+    pdf.set_ui_font("", CHAR_CODE_SIZE)
+    pdf.set_text_color(*MUTED)
+    pdf.set_xy(x, y + CHAR_CELL_HEIGHT - LABEL_LINE)
+    pdf.cell(tile_width, LABEL_LINE - 0.3, f"{codepoint:04X}", align="C")
 
 
 def _render_feature(
