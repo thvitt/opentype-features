@@ -23,7 +23,7 @@ def _summary_text(analyzer, examples, report_path):
 def test_report_writes_pdf_next_to_working_directory(test_font, in_tmp_path, options):
     app([str(test_font), *options], result_action="return_value")
 
-    assert (in_tmp_path / "FeatureTest-features.pdf").stat().st_size > 0
+    assert (in_tmp_path / "FeatureTest.pdf").stat().st_size > 0
 
 
 def test_report_writes_to_given_output(test_font, in_tmp_path):

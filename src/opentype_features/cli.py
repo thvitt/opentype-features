@@ -43,7 +43,7 @@ def report(
 
     Args:
         font: the .ttf or .otf font file to analyze
-        output: path of the PDF report [default: FONT name + "-features.pdf"]
+        output: path of the PDF report [default: FONT's name with .pdf, in the current directory]
         diff: add a picture of the pixel difference to each example
         min_ratio: hide examples whose relative visual difference is smaller
         hide_subtle: hide examples whose relative visual difference is below 1%
@@ -51,7 +51,7 @@ def report(
     """
     if hide_subtle:
         min_ratio = max(min_ratio, SUBTLE_RATIO)
-    output = output or Path(f"{font.stem}-features.pdf")
+    output = output or Path(font.with_suffix(".pdf").name)
     written = True
 
     analyzer = FontAnalyzer(font)
