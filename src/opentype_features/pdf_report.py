@@ -46,6 +46,21 @@ CHAR_LABEL_WIDTH = 14
 CHAR_CELL_HEIGHT = 9.5
 CHAR_CODE_SIZE = 4
 
+# Han, Hangul, kana and Bopomofo with their radicals, symbols and compatibility forms
+CJK_RANGES = (
+    range(0x1100, 0x1200),
+    range(0x2E80, 0x3400),
+    range(0x3400, 0x4DC0),
+    range(0x4E00, 0xA000),
+    range(0xA960, 0xA980),
+    range(0xAC00, 0xD800),
+    range(0xF900, 0xFB00),
+    range(0xFE30, 0xFE50),
+    range(0x1AFF0, 0x1B170),
+    range(0x1F200, 0x1F300),
+    range(0x20000, 0x40000),
+)
+
 # Unicode fonts for everything but the examples
 FONT_DIR = Path(__file__).parent / "fonts"
 UI_FONT = "DejaVuSans"
@@ -111,6 +126,7 @@ def render_pdf_report(
     show_diff: bool = False,
     aalt_only: bool = False,
     show_characters: bool = False,
+    skip_cjk: bool = False,
     on_feature: Callable[[], object] | None = None,
 ) -> None:
     """Write a PDF report of the examples of each feature."""
@@ -153,7 +169,7 @@ def render_pdf_report(
             on_feature()
 
     if show_characters:
-        _render_characters(pdf, analyzer)
+        _render_characters(pdf, analyzer, skip_cjk)
 
     pdf.output(str(output_path))
 
@@ -260,9 +276,25 @@ def _render_figures(
     pdf.ln(4)
 
 
-def _render_characters(pdf: ReportPDF, analyzer: FontAnalyzer) -> None:
-    """Render a code chart of the characters the font maps, 16 to a row."""
+def is_cjk(codepoint: int) -> bool:
+    """Check whether a code point belongs to the CJK scripts or their symbols."""
+    return any(codepoint in block for block in CJK_RANGES)
+
+
+def charted_codepoints(analyzer: FontAnalyzer, skip_cjk: bool) -> tuple[list[int], int]:
+    """Return the font's code points to chart and the number of skipped ones."""
     codepoints = sorted((analyzer.font.getBestCmap() or {}).keys())
+    if not skip_cjk:
+        return codepoints, 0
+    charted = [codepoint for codepoint in codepoints if not is_cjk(codepoint)]
+    return charted, len(codepoints) - len(charted)
+
+
+def _render_characters(
+    pdf: ReportPDF, analyzer: FontAnalyzer, skip_cjk: bool = False
+) -> None:
+    """Render a code chart of the characters the font maps, 16 to a row."""
+    codepoints, skipped = charted_codepoints(analyzer, skip_cjk)
     rows: dict[int, set[int]] = {}
     for codepoint in codepoints:
         rows.setdefault(codepoint // CHARS_PER_ROW, set()).add(codepoint)
@@ -275,7 +307,10 @@ def _render_characters(pdf: ReportPDF, analyzer: FontAnalyzer) -> None:
     pdf.cell(40, HEADING_HEIGHT - 2, "Characters")
     pdf.set_ui_font("", 7)
     pdf.set_text_color(*MUTED)
-    pdf.cell(0, HEADING_HEIGHT - 2, f"{len(codepoints)} encoded characters", align="R")
+    summary = f"{len(codepoints)} encoded characters"
+    if skipped:
+        summary += f" · {skipped} CJK characters omitted"
+    pdf.cell(0, HEADING_HEIGHT - 2, summary, align="R")
     pdf.set_y(pdf.get_y() + HEADING_HEIGHT)
 
     cell_width = (CONTENT_WIDTH - CHAR_LABEL_WIDTH) / CHARS_PER_ROW

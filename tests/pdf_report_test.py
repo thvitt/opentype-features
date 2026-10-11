@@ -1,3 +1,5 @@
+import pytest
+
 from opentype_features import FeatureExample, VisualComparator, score_examples
 from opentype_features.pdf_report import (
     CONTENT_WIDTH,
@@ -7,6 +9,8 @@ from opentype_features.pdf_report import (
     _layout_rows,
     _render_characters,
     _render_feature,
+    charted_codepoints,
+    is_cjk,
     render_pdf_report,
 )
 
@@ -86,3 +90,21 @@ def test_character_table_gets_its_own_section(analyzed, monkeypatch):
     _render_characters(pdf, analyzed)
 
     assert sections == [("Characters", 2)]
+
+
+@pytest.mark.parametrize("char", ["中", "あ", "カ", "한", "ㄅ", "。", "\U00020000"])
+def test_cjk_characters(char):
+    assert is_cjk(ord(char))
+
+
+@pytest.mark.parametrize("char", ["a", "Ω", "й", "→", "Ａ"])
+def test_non_cjk_characters(char):
+    assert not is_cjk(ord(char))
+
+
+def test_character_table_can_skip_cjk(analyzed, monkeypatch):
+    cmap = {ord(char): "a" for char in "ab中한"}
+    monkeypatch.setattr(analyzed.font, "getBestCmap", lambda: cmap)
+
+    assert charted_codepoints(analyzed, skip_cjk=False) == (sorted(cmap), 0)
+    assert charted_codepoints(analyzed, skip_cjk=True) == ([ord("a"), ord("b")], 2)
