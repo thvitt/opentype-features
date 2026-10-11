@@ -49,6 +49,7 @@ feature calt { sub [b c]' lookup ALT a; } calt;
 feature clig { sub f' lookup LIG i' a; } clig;
 feature dlig { sub b' lookup ALT c' lookup SC lookup ALT; } dlig;
 feature cv01 { sub d from [d.alt1 d.alt2]; } cv01;
+feature salt { sub b from [b.alt c.alt]; } salt;
 feature ss02 { sub [a A] [b B] by warning; } ss02;
 """
 

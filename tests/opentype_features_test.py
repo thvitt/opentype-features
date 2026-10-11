@@ -466,3 +466,14 @@ def test_feature_heading_stays_with_its_table(analyzed):
     )
 
     assert section_pages == [2]
+
+
+def test_all_alternates_of_stylistic_alternates_are_shown(analyzed):
+    examples = sorted(analyzed.feature_examples["salt"], key=lambda e: e.feature_value)
+
+    assert [(e.output_glyphs, e.feature_value) for e in examples] == [
+        ("b.alt", 1),
+        ("c.alt", 2),
+    ]
+    assert [analyzed.get_variant_label(e) for e in examples] == ["#1", "#2"]
+    assert len(_scored(analyzed, "salt")) == len(examples)

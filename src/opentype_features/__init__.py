@@ -501,9 +501,7 @@ class FontAnalyzer:
         return self.custom_feature_names.get(tag, FEATURE_NAMES.get(tag, tag))
 
     def get_variant_label(self, sub: FeatureExample) -> str:
-        """Return a label for the alternate a character variant substitution selects."""
-        if not is_character_variant(sub.feature_tag):
-            return ""
+        """Return a label for the alternate an alternate substitution selects."""
         names = self.variant_names.get(sub.feature_tag, [])
         index = sub.feature_value - 1
         if index < len(names) and names[index]:
@@ -619,7 +617,7 @@ class FontAnalyzer:
         result_map: dict[tuple[str, str, str], FeatureExample],
     ) -> None:
         """Process a standard fontFeatures FeatureExample rule."""
-        if is_character_variant(tag) and _is_alternate_substitution(rule):
+        if _is_alternate_substitution(rule):
             self._process_ff_alternates(rule, tag, langs, result_map)
             return
 
