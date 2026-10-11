@@ -30,7 +30,7 @@ from opentype_features.feature_names import FEATURE_NAMES, LANGUAGE_NAMES
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator, Mapping
+    from collections.abc import Callable, Iterable, Iterator, Mapping
 
     from fontFeatures import FontFeatures, Routine, Rule
 
@@ -485,7 +485,11 @@ class FontAnalyzer:
 
         return name_rec.toUnicode(errors="replace") if name_rec else None
 
-    def detect_default_features(self, comparator: VisualComparator) -> None:
+    def detect_default_features(
+        self,
+        comparator: VisualComparator,
+        on_example: Callable[[], object] | None = None,
+    ) -> None:
         """
         Determine which features the shaper applies without being asked.
 
@@ -498,16 +502,23 @@ class FontAnalyzer:
         self.contextual_default_features = set()
         for tag, subs in self.feature_examples.items():
             other_tags = self.feature_examples.keys() - {tag}
-            applied = sum(
-                comparator.is_applied_by_default(
+            applied = 0
+            for sub in subs:
+                applied += comparator.is_applied_by_default(
                     sub.input_chars, tag, sub.languages, other_tags
                 )
-                for sub in subs
-            )
+                if on_example:
+                    on_example()
             if applied * 2 >= len(subs):
                 self.default_features.add(tag)
             elif applied or tag in SHAPER_CONTEXT_FEATURES:
                 self.contextual_default_features.add(tag)
+
+    def get_full_name(self) -> str:
+        """Return the family and style name, or the file name if the font has none."""
+        family = self.get_name(16) or self.get_name(1) or self.font_path.stem
+        style = self.get_name(17) or self.get_name(2) or ""
+        return f"{family} {style}".strip()
 
     def get_feature_heading(self, tag: str) -> str:
         """Return the tag, its friendly name, and whether it is on by default."""
@@ -1076,11 +1087,16 @@ def group_examples(subs: list[FeatureExample]) -> list[FeatureExample]:
 
 
 def score_examples(
-    subs: list[FeatureExample], comparator: VisualComparator, min_ratio: float = 0.0
+    subs: list[FeatureExample],
+    comparator: VisualComparator,
+    min_ratio: float = 0.0,
+    on_example: Callable[[], object] | None = None,
 ) -> list[FeatureExample]:
     """Return the visibly changing substitutions, annotated with their scores."""
     scored = []
     for sub in subs:
+        if on_example:
+            on_example()
         try:
             diff_total, diff_ratio = comparator.get_difference_score(
                 sub.input_chars, sub.feature_tag, sub.languages, sub.feature_value
@@ -1100,6 +1116,7 @@ def collect_examples(
     comparator: VisualComparator,
     min_ratio: float = 0.0,
     aalt_only: bool = False,
+    on_example: Callable[[], object] | None = None,
 ) -> dict[str, list[FeatureExample]]:
     """Return the visible examples per feature, grouped and in report order."""
     return {
@@ -1112,6 +1129,7 @@ def collect_examples(
                 ],
                 comparator,
                 min_ratio,
+                on_example,
             )
         )
         for tag in sorted(analyzer.feature_examples, key=get_feature_priority)

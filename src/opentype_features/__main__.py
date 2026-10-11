@@ -1,13 +1,9 @@
 import logging
 import sys
 
-from fontTools.ttLib import TTLibError
-from rich.console import Console
 from rich.logging import RichHandler
 
-from opentype_features.cli import app
-
-error_console = Console(stderr=True)
+from opentype_features.cli import app, error_console
 
 
 def main() -> None:
@@ -18,8 +14,8 @@ def main() -> None:
     logging.captureWarnings(capture=True)
     try:
         app()
-    except TTLibError as error:
-        error_console.print(f"[bold red]Error:[/bold red] not a usable font: {error}")
+    except ValueError as error:
+        error_console.print(f"[bold red]Error:[/bold red] {error}")
         sys.exit(1)
 
 

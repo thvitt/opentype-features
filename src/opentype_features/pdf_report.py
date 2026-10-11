@@ -16,6 +16,8 @@ from opentype_features import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from opentype_features import (
         FeatureExample,
         FontAnalyzer,
@@ -104,11 +106,11 @@ def render_pdf_report(
     comparator: VisualComparator,
     show_diff: bool = False,
     aalt_only: bool = False,
+    on_feature: Callable[[], object] | None = None,
 ) -> None:
     """Write a PDF report of the examples of each feature."""
-    family = analyzer.get_name(16) or analyzer.get_name(1) or analyzer.font_path.stem
-    style = analyzer.get_name(17) or analyzer.get_name(2) or ""
-    pdf = ReportPDF(f"{family} {style} · OpenType features")
+    name = analyzer.get_full_name()
+    pdf = ReportPDF(f"{name} · OpenType features")
     pdf.add_font("TargetFont", style="", fname=str(actual_font_path))
     # Names in scripts DejaVu lacks are most likely covered by the font itself
     pdf.set_fallback_fonts(["TargetFont"], exact_match=False)
@@ -120,7 +122,7 @@ def render_pdf_report(
     for tag in FIGURE_TAGS & set(shown_tags):
         links[tag] = figures_link
 
-    _render_title(pdf, analyzer, f"{family} {style}".strip())
+    _render_title(pdf, analyzer, name)
     _render_overview(pdf, analyzer, examples_by_tag, shown_tags, links)
 
     supported = analyzer.get_supported_features()
@@ -128,21 +130,22 @@ def render_pdf_report(
         _render_figures(pdf, analyzer, supported, figures_link)
 
     for tag in shown_tags:
-        if tag in FIGURE_TAGS:
-            continue
-        try:
-            _render_feature(
-                pdf,
-                analyzer,
-                comparator,
-                tag,
-                examples_by_tag[tag],
-                show_diff,
-                links[tag],
-                aalt_only,
-            )
-        except Exception:
-            logger.exception("Could not render feature %s", tag)
+        if tag not in FIGURE_TAGS:
+            try:
+                _render_feature(
+                    pdf,
+                    analyzer,
+                    comparator,
+                    tag,
+                    examples_by_tag[tag],
+                    show_diff,
+                    links[tag],
+                    aalt_only,
+                )
+            except Exception:
+                logger.exception("Could not render feature %s", tag)
+        if on_feature:
+            on_feature()
 
     pdf.output(str(output_path))
 
