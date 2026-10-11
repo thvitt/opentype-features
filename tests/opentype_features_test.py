@@ -369,7 +369,7 @@ def test_diff_image_reuses_scoring_renderings(test_font, monkeypatch):
 def test_detect_default_features(analyzed):
     analyzed.detect_default_features(VisualComparator(analyzed.font_path))
 
-    assert analyzed.default_features == {"calt", "clig", "liga", "locl"}
+    assert analyzed.default_features == {"calt", "clig", "kern", "liga", "locl", "mark"}
     assert analyzed.contextual_default_features == set()
     assert analyzed.get_feature_heading("liga") == (
         "liga (Standard Ligatures), on by default"
@@ -477,3 +477,70 @@ def test_all_alternates_of_stylistic_alternates_are_shown(analyzed):
     ]
     assert [analyzed.get_variant_label(e) for e in examples] == ["#1", "#2"]
     assert len(_scored(analyzed, "salt")) == len(examples)
+
+
+def _adjustments(analyzer, tag):
+    return sorted(
+        (e.input_glyphs, e.adjustment)
+        for e in analyzer.feature_examples[tag]
+        if e.positioning and e.input_chars == e.output_chars
+    )
+
+
+def test_kerning_pairs(analyzed):
+    assert _adjustments(analyzed, "kern") == [("a b", -150), ("c a", 120)]
+    assert len(_scored(analyzed, "kern")) == len(analyzed.feature_examples["kern"])
+    kern = analyzed.feature_examples["kern"][0]
+    assert analyzed.get_cell_label(kern) in {"-150", "+120"}
+
+
+def test_single_positioning_expands_classes(analyzed):
+    assert _adjustments(analyzed, "lfbd") == [("A", -100), ("B", -100)]
+
+
+def test_contextual_positioning(analyzed):
+    assert _adjustments(analyzed, "cpsp") == [("A B", 100)]
+    assert _scored(analyzed, "cpsp")
+
+
+def test_mark_attachment(analyzed):
+    (example,) = analyzed.feature_examples["mark"]
+    assert example.input_glyphs in {"a acutecomb", "b acutecomb"}
+    assert example.positioning
+    assert _scored(analyzed, "mark")
+
+
+def test_positioning_keeps_strongest_examples(test_font, monkeypatch):
+    monkeypatch.setattr("opentype_features.MAX_POSITIONING_EXAMPLES", 1)
+    analyzer = FontAnalyzer(test_font)
+    analyzer.analyze()
+
+    assert _adjustments(analyzer, "kern") == [("a b", -150)]
+    assert analyzer.positioning_totals == {"kern": 2, "lfbd": 2}
+
+
+def test_positioning_prefers_encoded_inputs(analyzer, monkeypatch):
+    unencoded = chr(PUA_START)
+    examples = [
+        FeatureExample(
+            "x", unencoded, "x", unencoded, "kern", positioning=True, adjustment=-300
+        ),
+        FeatureExample(
+            "A V", "AV", "A V", "AV", "kern", positioning=True, adjustment=-80
+        ),
+    ]
+    routine = MagicMock(languages=[], rules=examples)
+    font_features = MagicMock(features={"kern": [MagicMock(routine=routine)]})
+    monkeypatch.setattr("opentype_features.unparse", lambda _font: font_features)
+    monkeypatch.setattr(
+        analyzer,
+        "_process_rule",
+        lambda rule, tag, _langs, result_map: result_map.setdefault(
+            (tag, rule.input_chars, rule.output_chars), rule
+        ),
+    )
+    monkeypatch.setattr("opentype_features.MAX_POSITIONING_EXAMPLES", 1)
+
+    analyzer.analyze()
+
+    assert [e.input_chars for e in analyzer.feature_examples["kern"]] == ["AV"]

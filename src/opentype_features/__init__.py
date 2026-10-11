@@ -2,6 +2,7 @@
 
 import argparse
 import functools
+import itertools
 import logging
 import math
 import sys
@@ -12,7 +13,13 @@ from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 import uharfbuzz as hb
-from fontFeatures import Chaining, RoutineReference, Substitution
+from fontFeatures import (
+    Attachment,
+    Chaining,
+    Positioning,
+    RoutineReference,
+    Substitution,
+)
 from fontFeatures.ttLib import unparse
 from fontTools.ttLib import TTFont
 from fontTools.ttLib.tables._c_m_a_p import CmapSubtable
@@ -47,6 +54,9 @@ RENDER_CACHE_SIZE = 1024
 
 # Minimum number of inputs mapping to the same output to be shown as one entry
 MIN_GROUP_SIZE = 4
+
+# Positioning features such as kerning have thousands of rules, keep the strongest
+MAX_POSITIONING_EXAMPLES = 60
 
 # Applied by script-specific shapers depending on the context, e.g. Arabic joining
 SHAPER_CONTEXT_FEATURES = frozenset(
@@ -97,8 +107,17 @@ class FeatureExample:
     diff_total: float = 1.0
     diff_ratio: float = 1.0
     feature_value: int = 1
-    # Further substitutions with inputs of the same length and the same output
+    # Further examples with inputs of the same length and the same output
     input_variants: tuple[FeatureExample, ...] = ()
+    # Positioning examples move glyphs instead of replacing them
+    positioning: bool = False
+    # Main value of a positioning adjustment in font units, e.g. the kerning
+    adjustment: int = 0
+
+    @property
+    def has_unencoded_input(self) -> bool:
+        """Check whether the input contains glyphs without a Unicode mapping."""
+        return any(ord(char) >= PUA_START for char in self.input_chars)
 
     @property
     def all_input_chars(self) -> list[str]:
@@ -409,6 +428,8 @@ class FontAnalyzer:
         self.variant_names: dict[str, list[str]] = {}
         self.tags_with_alternates: set[str] = set()
         self.default_features: set[str] = set()
+        # Number of positioning examples of features where only the strongest are kept
+        self.positioning_totals: dict[str, int] = {}
         self.contextual_default_features: set[str] = set()
         self._read_feature_params()
 
@@ -511,12 +532,15 @@ class FontAnalyzer:
         return ""
 
     def get_cell_label(self, sub: FeatureExample) -> str:
-        """Return the small label shown above a substitution in the report."""
+        """Return the small label shown above an example in the report."""
         if sub.feature_tag == "locl" and sub.languages:
             label = ",".join(self.get_language_name(lang) for lang in sub.languages)
         else:
             label = self.get_variant_label(sub)
-        return ", ".join(part for part in (label, sub.input_summary) if part)
+        adjustment = f"{sub.adjustment:+d}" if sub.adjustment else ""
+        return ", ".join(
+            part for part in (label, sub.input_summary, adjustment) if part
+        )
 
     def get_language_name(self, lang_tag: str) -> str:
         """Return the friendly name for an OpenType language tag."""
@@ -593,9 +617,22 @@ class FontAnalyzer:
 
         self.feature_examples = {}
         for sub in result_map.values():
-            if sub.feature_tag not in self.feature_examples:
-                self.feature_examples[sub.feature_tag] = []
-            self.feature_examples[sub.feature_tag].append(sub)
+            self.feature_examples.setdefault(sub.feature_tag, []).append(sub)
+
+        self.positioning_totals = {}
+        for tag, examples in self.feature_examples.items():
+            positioning = [e for e in examples if e.positioning]
+            if len(positioning) > MAX_POSITIONING_EXAMPLES:
+                self.positioning_totals[tag] = len(positioning)
+                # Prefer what can be typed, then the largest adjustments
+                strongest = sorted(
+                    positioning,
+                    key=lambda e: (e.has_unencoded_input, -abs(e.adjustment)),
+                )
+                self.feature_examples[tag] = [
+                    *(e for e in examples if not e.positioning),
+                    *strongest[:MAX_POSITIONING_EXAMPLES],
+                ]
 
     def _process_rule(
         self,
@@ -608,6 +645,10 @@ class FontAnalyzer:
             self._process_ff_substitution(rule, tag, langs, result_map)
         elif isinstance(rule, Chaining):
             self._process_ff_chaining(rule, tag, langs, result_map)
+        elif isinstance(rule, Positioning):
+            self._process_ff_positioning(rule, tag, langs, result_map)
+        elif isinstance(rule, Attachment):
+            self._process_ff_attachment(rule, tag, langs, result_map)
 
     def _process_ff_substitution(
         self,
@@ -616,7 +657,7 @@ class FontAnalyzer:
         langs: tuple[str, ...],
         result_map: dict[tuple[str, str, str], FeatureExample],
     ) -> None:
-        """Process a standard fontFeatures FeatureExample rule."""
+        """Process a standard fontFeatures Substitution rule."""
         if _is_alternate_substitution(rule):
             self._process_ff_alternates(rule, tag, langs, result_map)
             return
@@ -663,15 +704,62 @@ class FontAnalyzer:
         postcontext = [glyph_class[0] for glyph_class in rule.postcontext]
 
         for in_seq in _expand_chain_inputs(rule):
-            out_seq = _apply_chain_lookups(rule.lookups, in_seq)
-            if out_seq != in_seq:
+            out_seq, adjustment = _apply_chain_lookups(rule.lookups, in_seq)
+            if out_seq != in_seq or adjustment is not None:
                 self._add_to_result_map(
                     tag,
                     precontext + in_seq + postcontext,
                     precontext + out_seq + postcontext,
                     langs,
                     result_map,
+                    positioning=out_seq == in_seq,
+                    adjustment=adjustment or 0,
                 )
+
+    def _process_ff_positioning(
+        self,
+        rule: Positioning,
+        tag: str,
+        langs: tuple[str, ...],
+        result_map: dict[tuple[str, str, str], FeatureExample],
+    ) -> None:
+        """Process a single or pair positioning rule, e.g. kerning."""
+        precontext = [self._representative(c) for c in rule.precontext or []]
+        postcontext = [self._representative(c) for c in rule.postcontext or []]
+        first_glyphs = [self._representative(c) for c in rule.glyphs]
+        for glyph in rule.glyphs[0] if len(rule.glyphs) == 1 else first_glyphs[:1]:
+            glyphs = [*precontext, glyph, *first_glyphs[1:], *postcontext]
+            self._add_to_result_map(
+                tag,
+                glyphs,
+                glyphs,
+                langs,
+                result_map,
+                positioning=True,
+                adjustment=_main_adjustment(rule),
+            )
+
+    def _representative(self, glyph_class: list[str]) -> str:
+        """Return the glyph of a class with the lowest code point, if any is encoded."""
+        return min(
+            glyph_class,
+            key=lambda g: (g not in self.reverse_cmap, self.reverse_cmap.get(g, 0)),
+        )
+
+    def _process_ff_attachment(
+        self,
+        rule: Attachment,
+        tag: str,
+        langs: tuple[str, ...],
+        result_map: dict[tuple[str, str, str], FeatureExample],
+    ) -> None:
+        """Process a mark attachment rule, pairing each mark with one of the bases."""
+        encoded_first = sorted(rule.bases, key=lambda g: g not in self.reverse_cmap)
+        marks = sorted(rule.marks, key=lambda g: g not in self.reverse_cmap)
+        for base, mark in zip(itertools.cycle(encoded_first), marks, strict=False):
+            self._add_to_result_map(
+                tag, [base, mark], [base, mark], langs, result_map, positioning=True
+            )
 
     def _add_to_result_map(
         self,
@@ -681,8 +769,10 @@ class FontAnalyzer:
         langs: tuple[str, ...],
         result_map: dict[tuple[str, str, str], FeatureExample],
         feature_value: int = 1,
+        positioning: bool = False,
+        adjustment: int = 0,
     ) -> None:
-        """Add or combine a substitution in the result map."""
+        """Add or combine an example in the result map."""
         in_chars = "".join(self.get_char(g) for g in in_glyphs)
         out_chars = "".join(self.get_char(g) for g in out_glyphs)
         key = (tag, in_chars, out_chars)
@@ -695,6 +785,8 @@ class FontAnalyzer:
                 feature_tag=tag,
                 languages=langs,
                 feature_value=feature_value,
+                positioning=positioning,
+                adjustment=adjustment,
             )
         else:
             existing = result_map[key]
@@ -1005,6 +1097,29 @@ def _match_substitution(
     return None
 
 
+def _main_adjustment(rule: Positioning) -> int:
+    """Return the first non-zero value of a positioning rule's value records."""
+    fields = ("xAdvance", "xPlacement", "yPlacement", "yAdvance")
+    values = (
+        getattr(record, field) or 0
+        for record in rule.valuerecords
+        if record
+        for field in fields
+    )
+    return next((value for value in values if value), 0)
+
+
+def _match_positioning(routine: Routine, glyphs: list[str]) -> int | None:
+    """Return the main adjustment of the routine's positioning rule matching glyphs."""
+    for rule in routine.rules:
+        if not isinstance(rule, Positioning) or len(rule.glyphs) > len(glyphs):
+            continue
+        window = glyphs[: len(rule.glyphs)]
+        if all(g in cls for g, cls in zip(window, rule.glyphs, strict=True)):
+            return _main_adjustment(rule)
+    return None
+
+
 def _expand_chain_inputs(rule: Chaining) -> list[list[str]]:
     """Return input sequences covering each glyph of the first substituted class."""
     first_glyphs = [glyph_class[0] for glyph_class in rule.input]
@@ -1019,9 +1134,14 @@ def _expand_chain_inputs(rule: Chaining) -> list[list[str]]:
 
 def _apply_chain_lookups(
     lookups: list[list[RoutineReference | Routine] | None], in_seq: list[str]
-) -> list[str]:
-    """Apply the lookups of a chaining rule to an input sequence."""
+) -> tuple[list[str], int | None]:
+    """
+    Apply the lookups of a chaining rule to an input sequence.
+
+    Returns the output glyphs and, if a positioning lookup matched, its adjustment.
+    """
     parts = [[glyph] for glyph in in_seq]
+    adjustment = None
     for i, position_lookups in enumerate(lookups):
         for lookup in position_lookups or []:
             if len(parts[i]) != 1:  # consumed by a ligature or multiplied
@@ -1029,10 +1149,13 @@ def _apply_chain_lookups(
             routine = lookup.routine if isinstance(lookup, RoutineReference) else lookup
             if routine is None:
                 continue
-            if match := _match_substitution(routine, [*parts[i], *in_seq[i + 1 :]]):
+            glyphs = [*parts[i], *in_seq[i + 1 :]]
+            if match := _match_substitution(routine, glyphs):
                 length, replacement = match
                 parts[i : i + length] = [replacement] + [[]] * (length - 1)
-    return [glyph for part in parts for glyph in part]
+            elif adjustment is None:
+                adjustment = _match_positioning(routine, glyphs)
+    return [glyph for part in parts for glyph in part], adjustment
 
 
 def get_feature_priority(tag: str) -> tuple[int, str]:
