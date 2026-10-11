@@ -12,8 +12,7 @@ from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 import uharfbuzz as hb
-from fontFeatures import Chaining, RoutineReference
-from fontFeatures import Substitution as FFSubstitution
+from fontFeatures import Chaining, RoutineReference, Substitution
 from fontFeatures.ttLib import unparse
 from fontTools.ttLib import TTFont
 from fontTools.ttLib.tables._c_m_a_p import CmapSubtable
@@ -86,8 +85,8 @@ BASELINE_FEATURES = {"liga": False, "calt": False, "kern": False}
 
 
 @dataclass(frozen=True)
-class Substitution:
-    """Represents a single OpenType substitution."""
+class FeatureExample:
+    """An input text whose rendering an OpenType feature changes."""
 
     input_glyphs: str
     input_chars: str
@@ -99,7 +98,7 @@ class Substitution:
     diff_ratio: float = 1.0
     feature_value: int = 1
     # Further substitutions with inputs of the same length and the same output
-    input_variants: tuple[Substitution, ...] = ()
+    input_variants: tuple[FeatureExample, ...] = ()
 
     @property
     def all_input_chars(self) -> list[str]:
@@ -405,7 +404,7 @@ class FontAnalyzer:
         self.font = TTFont(str(font_path))
         self.reverse_cmap = self._build_reverse_cmap()
         self.pua_map: dict[str, str] = {}
-        self.feature_substitutions: dict[str, list[Substitution]] = {}
+        self.feature_examples: dict[str, list[FeatureExample]] = {}
         self.custom_feature_names: dict[str, str] = {}
         self.variant_names: dict[str, list[str]] = {}
         self.tags_with_alternates: set[str] = set()
@@ -475,8 +474,8 @@ class FontAnalyzer:
         """
         self.default_features = set()
         self.contextual_default_features = set()
-        for tag, subs in self.feature_substitutions.items():
-            other_tags = self.feature_substitutions.keys() - {tag}
+        for tag, subs in self.feature_examples.items():
+            other_tags = self.feature_examples.keys() - {tag}
             applied = sum(
                 comparator.is_applied_by_default(
                     sub.input_chars, tag, sub.languages, other_tags
@@ -501,7 +500,7 @@ class FontAnalyzer:
         """Return the friendly name for an OpenType feature tag."""
         return self.custom_feature_names.get(tag, FEATURE_NAMES.get(tag, tag))
 
-    def get_variant_label(self, sub: Substitution) -> str:
+    def get_variant_label(self, sub: FeatureExample) -> str:
         """Return a label for the alternate a character variant substitution selects."""
         if not is_character_variant(sub.feature_tag):
             return ""
@@ -513,7 +512,7 @@ class FontAnalyzer:
             return f"#{sub.feature_value}"
         return ""
 
-    def get_cell_label(self, sub: Substitution) -> str:
+    def get_cell_label(self, sub: FeatureExample) -> str:
         """Return the small label shown above a substitution in the report."""
         if sub.feature_tag == "locl" and sub.languages:
             label = ",".join(self.get_language_name(lang) for lang in sub.languages)
@@ -550,7 +549,7 @@ class FontAnalyzer:
 
     def get_supported_features(self) -> set[str]:
         """Return all feature tags supported by the font."""
-        return set(self.feature_substitutions.keys())
+        return set(self.feature_examples.keys())
 
     def get_figure_chars(self) -> str:
         """Return a string of all characters involved in figure substitutions."""
@@ -560,8 +559,8 @@ class FontAnalyzer:
         extra_chars: set[str] = set()
 
         for tag in fig_tags:
-            if tag in self.feature_substitutions:
-                for sub in self.feature_substitutions[tag]:
+            if tag in self.feature_examples:
+                for sub in self.feature_examples[tag]:
                     for char in sub.input_chars:
                         # Only include if it's not a standard digit and not a PUA character
                         if "0" <= char <= "9":
@@ -575,8 +574,8 @@ class FontAnalyzer:
         """Analyze the font's features using fontFeatures."""
         ff = unparse(self.font)
 
-        # (tag, in_chars, out_chars) -> Substitution
-        result_map: dict[tuple[str, str, str], Substitution] = {}
+        # (tag, in_chars, out_chars) -> FeatureExample
+        result_map: dict[tuple[str, str, str], FeatureExample] = {}
 
         for tag, routine_refs in ff.features.items():
             for ref in routine_refs:
@@ -594,32 +593,32 @@ class FontAnalyzer:
                     except Exception as error:
                         logger.warning("Skipping a rule of feature %s: %r", tag, error)
 
-        self.feature_substitutions = {}
+        self.feature_examples = {}
         for sub in result_map.values():
-            if sub.feature_tag not in self.feature_substitutions:
-                self.feature_substitutions[sub.feature_tag] = []
-            self.feature_substitutions[sub.feature_tag].append(sub)
+            if sub.feature_tag not in self.feature_examples:
+                self.feature_examples[sub.feature_tag] = []
+            self.feature_examples[sub.feature_tag].append(sub)
 
     def _process_rule(
         self,
         rule: Rule,
         tag: str,
         langs: tuple[str, ...],
-        result_map: dict[tuple[str, str, str], Substitution],
+        result_map: dict[tuple[str, str, str], FeatureExample],
     ) -> None:
-        if isinstance(rule, FFSubstitution):
+        if isinstance(rule, Substitution):
             self._process_ff_substitution(rule, tag, langs, result_map)
         elif isinstance(rule, Chaining):
             self._process_ff_chaining(rule, tag, langs, result_map)
 
     def _process_ff_substitution(
         self,
-        rule: FFSubstitution,
+        rule: Substitution,
         tag: str,
         langs: tuple[str, ...],
-        result_map: dict[tuple[str, str, str], Substitution],
+        result_map: dict[tuple[str, str, str], FeatureExample],
     ) -> None:
-        """Process a standard fontFeatures Substitution rule."""
+        """Process a standard fontFeatures FeatureExample rule."""
         if is_character_variant(tag) and _is_alternate_substitution(rule):
             self._process_ff_alternates(rule, tag, langs, result_map)
             return
@@ -637,10 +636,10 @@ class FontAnalyzer:
 
     def _process_ff_alternates(
         self,
-        rule: FFSubstitution,
+        rule: Substitution,
         tag: str,
         langs: tuple[str, ...],
-        result_map: dict[tuple[str, str, str], Substitution],
+        result_map: dict[tuple[str, str, str], FeatureExample],
     ) -> None:
         """Add one substitution per alternate, selected by the feature value."""
         self.tags_with_alternates.add(tag)
@@ -659,7 +658,7 @@ class FontAnalyzer:
         rule: Chaining,
         tag: str,
         langs: tuple[str, ...],
-        result_map: dict[tuple[str, str, str], Substitution],
+        result_map: dict[tuple[str, str, str], FeatureExample],
     ) -> None:
         """Process a fontFeatures Chaining rule, shown with its context."""
         precontext = [glyph_class[0] for glyph_class in rule.precontext]
@@ -682,7 +681,7 @@ class FontAnalyzer:
         in_glyphs: list[str],
         out_glyphs: list[str],
         langs: tuple[str, ...],
-        result_map: dict[tuple[str, str, str], Substitution],
+        result_map: dict[tuple[str, str, str], FeatureExample],
         feature_value: int = 1,
     ) -> None:
         """Add or combine a substitution in the result map."""
@@ -690,7 +689,7 @@ class FontAnalyzer:
         out_chars = "".join(self.get_char(g) for g in out_glyphs)
         key = (tag, in_chars, out_chars)
         if key not in result_map:
-            result_map[key] = Substitution(
+            result_map[key] = FeatureExample(
                 input_glyphs=" ".join(self.get_display_name(g) for g in in_glyphs),
                 input_chars=in_chars,
                 output_glyphs=" ".join(self.get_display_name(g) for g in out_glyphs),
@@ -731,7 +730,7 @@ class FontAnalyzer:
 
 def _render_compact_table(
     pdf: FPDF,
-    subs: list[Substitution],
+    subs: list[FeatureExample],
     y: float,
     analyzer: FontAnalyzer,
     comparator: VisualComparator,
@@ -768,8 +767,8 @@ def _chunk_height(show_diff: bool, has_labels: bool) -> float:
 
 
 def _get_next_sub_chunk(
-    subs: list[Substitution], start_index: int, available_width: float
-) -> tuple[list[tuple[Substitution, float]], int]:
+    subs: list[FeatureExample], start_index: int, available_width: float
+) -> tuple[list[tuple[FeatureExample, float]], int]:
     """Calculate how many substitutions fit in the current row."""
     chunk = []
     current_row_width: float = 0
@@ -791,7 +790,7 @@ def _get_next_sub_chunk(
 
 def _render_chunk_row(
     pdf: FPDF,
-    chunk: list[tuple[Substitution, float]],
+    chunk: list[tuple[FeatureExample, float]],
     mode: Literal["off", "on", "diff"],
     y: float,
     comparator: VisualComparator,
@@ -883,7 +882,7 @@ def _render_chunk_row(
 
 
 def _render_cell_labels(
-    pdf: FPDF, chunk: list[tuple[Substitution, float]], labels: list[str], y: float
+    pdf: FPDF, chunk: list[tuple[FeatureExample, float]], labels: list[str], y: float
 ) -> float:
     """Render small labels above the substitutions, e.g. their languages or variant."""
     label_size = 4
@@ -973,7 +972,7 @@ def is_character_variant(tag: str) -> bool:
     return tag.startswith("cv") and tag[2:].isdigit()
 
 
-def _is_alternate_substitution(rule: FFSubstitution) -> bool:
+def _is_alternate_substitution(rule: Substitution) -> bool:
     """Check whether a rule offers several alternates for a single glyph."""
     return (
         len(rule.input) == 1
@@ -983,7 +982,7 @@ def _is_alternate_substitution(rule: FFSubstitution) -> bool:
     )
 
 
-def _replacement_for(rule: FFSubstitution, first_glyph: str) -> list[str]:
+def _replacement_for(rule: Substitution, first_glyph: str) -> list[str]:
     """Return the glyphs a substitution produces for an input starting with first_glyph."""
     input_class = rule.input[0]
     if (
@@ -1000,7 +999,7 @@ def _match_substitution(
 ) -> tuple[int, list[str]] | None:
     """Return the input length and output of the routine's rule matching glyphs."""
     for rule in routine.rules:
-        if not isinstance(rule, FFSubstitution) or len(rule.input) > len(glyphs):
+        if not isinstance(rule, Substitution) or len(rule.input) > len(glyphs):
             continue
         window = glyphs[: len(rule.input)]
         if all(g in cls for g, cls in zip(window, rule.input, strict=True)):
@@ -1084,9 +1083,9 @@ def get_feature_priority(tag: str) -> tuple[int, str]:
     return (priority, tag)
 
 
-def group_substitutions(subs: list[Substitution]) -> list[Substitution]:
+def group_examples(subs: list[FeatureExample]) -> list[FeatureExample]:
     """Fold many equally long inputs producing the same output into one entry."""
-    groups: dict[tuple[str, int, int], list[Substitution]] = {}
+    groups: dict[tuple[str, int, int], list[FeatureExample]] = {}
     for sub in subs:
         key = (sub.output_chars, sub.feature_value, len(sub.input_chars))
         groups.setdefault(key, []).append(sub)
@@ -1101,9 +1100,9 @@ def group_substitutions(subs: list[Substitution]) -> list[Substitution]:
     return grouped
 
 
-def score_substitutions(
-    subs: list[Substitution], comparator: VisualComparator, min_ratio: float = 0.0
-) -> list[Substitution]:
+def score_examples(
+    subs: list[FeatureExample], comparator: VisualComparator, min_ratio: float = 0.0
+) -> list[FeatureExample]:
     """Return the visibly changing substitutions, annotated with their scores."""
     scored = []
     for sub in subs:
@@ -1170,7 +1169,7 @@ def render_pdf_report(
         pdf.set_y(y)
 
     remaining_tags = sorted(
-        [t for t in analyzer.feature_substitutions if t not in fig_tags],
+        [t for t in analyzer.feature_examples if t not in fig_tags],
         key=get_feature_priority,
     )
 
@@ -1196,8 +1195,8 @@ def _render_feature(
     min_ratio: float,
 ) -> None:
     """Render the section of a single feature."""
-    subs = group_substitutions(
-        score_substitutions(analyzer.feature_substitutions[tag], comparator, min_ratio)
+    subs = group_examples(
+        score_examples(analyzer.feature_examples[tag], comparator, min_ratio)
     )
     if subs:
         friendly_name = analyzer.get_tag_name(tag)
@@ -1235,14 +1234,14 @@ def print_console_report(
     With a comparator, substitutions without a relative visual difference of at
     least min_ratio are left out.
     """
-    for tag in sorted(analyzer.feature_substitutions.keys()):
-        subs = analyzer.feature_substitutions[tag]
+    for tag in sorted(analyzer.feature_examples.keys()):
+        subs = analyzer.feature_examples[tag]
         if comparator:
-            subs = score_substitutions(subs, comparator, min_ratio)
+            subs = score_examples(subs, comparator, min_ratio)
             if not subs:
                 continue
         print(f"\nFeature: {analyzer.get_feature_heading(tag)}")
-        for sub in group_substitutions(subs):
+        for sub in group_examples(subs):
             notes = [analyzer.get_variant_label(sub), sub.input_summary]
             if sub.input_variants and sub.input_alternatives is None:
                 notes.append(
@@ -1294,7 +1293,7 @@ def main() -> None:
     analyzer = FontAnalyzer(font_path)
     analyzer.analyze()
 
-    if not analyzer.feature_substitutions:
+    if not analyzer.feature_examples:
         print("No OpenType features with substitutions found.")
         return
 

@@ -2,24 +2,24 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
-from fontFeatures import Substitution as FFSubstitution
+from fontFeatures import Substitution
 from fontTools.ttLib import TTFont
 from fpdf import FPDF
 
 from opentype_features import (
     PAGE_BOTTOM_MARGIN,
     PUA_START,
+    FeatureExample,
     FontAnalyzer,
-    Substitution,
     VisualComparator,
     _render_feature,
     get_feature_priority,
-    group_substitutions,
+    group_examples,
     is_character_variant,
     main,
     print_console_report,
     render_pdf_report,
-    score_substitutions,
+    score_examples,
     shaping_language,
 )
 
@@ -131,14 +131,14 @@ def test_get_feature_priority():
 
 def test_get_figure_chars(analyzer):
     """Test collection of characters for the figures section."""
-    analyzer.feature_substitutions = {
-        "lnum": [Substitution("a", "a", "A", "A", "lnum")],
+    analyzer.feature_examples = {
+        "lnum": [FeatureExample("a", "a", "A", "A", "lnum")],
         "onum": [
-            Substitution("0", "0", "0.old", "0", "onum"),
-            Substitution("pua", chr(PUA_START), "x", "x", "onum"),
-            Substitution("%", "%", "%.alt", "%", "onum"),
+            FeatureExample("0", "0", "0.old", "0", "onum"),
+            FeatureExample("pua", chr(PUA_START), "x", "x", "onum"),
+            FeatureExample("%", "%", "%.alt", "%", "onum"),
         ],
-        "other": [Substitution("x", "x", "X", "X", "other")],
+        "other": [FeatureExample("x", "x", "X", "X", "other")],
     }
     # Should be "0123456789" + sorted("%", "a")
     chars = analyzer.get_figure_chars()
@@ -158,7 +158,7 @@ def analyzed(test_font):
 
 def _scored(analyzer, tag, font_path=None):
     comparator = VisualComparator(font_path or analyzer.font_path)
-    return score_substitutions(analyzer.feature_substitutions[tag], comparator)
+    return score_examples(analyzer.feature_examples[tag], comparator)
 
 
 def test_visual_comparator(test_font):
@@ -187,7 +187,7 @@ def test_is_character_variant():
 
 
 def _alternate_rule(in_glyph, out_glyphs):
-    rule = MagicMock(spec=FFSubstitution)
+    rule = MagicMock(spec=Substitution)
     rule.input = [[in_glyph]]
     rule.replacement = [out_glyphs]
     return rule
@@ -214,7 +214,7 @@ def test_variant_label_prefers_font_names(analyzer):
 
     def label(value):
         return analyzer.get_variant_label(
-            Substitution("a", "a", "a.alt", "x", "cv01", feature_value=value)
+            FeatureExample("a", "a", "a.alt", "x", "cv01", feature_value=value)
         )
 
     assert label(1) == "Round"
@@ -223,9 +223,9 @@ def test_variant_label_prefers_font_names(analyzer):
 
 
 def test_variant_label_empty_without_alternates(analyzer):
-    plain = Substitution("a", "a", "a.alt", "x", "cv02")
+    plain = FeatureExample("a", "a", "a.alt", "x", "cv02")
     assert analyzer.get_variant_label(plain) == ""
-    assert analyzer.get_variant_label(Substitution("a", "a", "A", "A", "smcp")) == ""
+    assert analyzer.get_variant_label(FeatureExample("a", "a", "A", "A", "smcp")) == ""
 
 
 def test_localized_forms_are_scored_as_different(analyzed):
@@ -272,7 +272,7 @@ def test_pdf_report_compares_with_modified_font(analyzed, tmp_path, monkeypatch)
 
 def _glyph_mappings(analyzer, tag):
     return sorted(
-        (s.input_glyphs, s.output_glyphs) for s in analyzer.feature_substitutions[tag]
+        (s.input_glyphs, s.output_glyphs) for s in analyzer.feature_examples[tag]
     )
 
 
@@ -293,7 +293,7 @@ def test_chaining_tries_all_lookups_at_each_position(analyzed):
 
 def test_class_substitution_is_expanded(analyzer):
     analyzer.reverse_cmap = {"a": ord("a"), "b": ord("b")}
-    rule = MagicMock(spec=FFSubstitution)
+    rule = MagicMock(spec=Substitution)
     rule.input = [["a", "b"]]
     rule.replacement = [["a.sc", "b.sc"]]
     result_map = {}
@@ -325,9 +325,9 @@ def test_pdf_report_logs_unwritable_output(analyzed, tmp_path, caplog):
 def test_scoring_skips_failing_comparisons(analyzed, caplog):
     comparator = MagicMock(spec=VisualComparator)
     comparator.get_difference_score.side_effect = [RuntimeError("boom"), (0.5, 0.5)]
-    subs = analyzed.feature_substitutions["calt"]
+    subs = analyzed.feature_examples["calt"]
 
-    scored = score_substitutions(subs, comparator)
+    scored = score_examples(subs, comparator)
 
     assert [s.input_glyphs for s in scored] == [subs[1].input_glyphs]
     assert "Could not compare" in caplog.text
@@ -344,7 +344,7 @@ def test_analysis_skips_failing_rules(analyzer, monkeypatch, caplog):
 
     analyzer.analyze()
 
-    assert analyzer.feature_substitutions == {}
+    assert analyzer.feature_examples == {}
     assert "Skipping a rule of feature liga" in caplog.text
 
 
@@ -413,11 +413,11 @@ def test_main_writes_reports(test_font, tmp_path, monkeypatch, capsys, option):
 
 
 def _subs_to(output, *inputs):
-    return [Substitution(text, text, output, output, "frac") for text in inputs]
+    return [FeatureExample(text, text, output, output, "frac") for text in inputs]
 
 
 def test_grouping_folds_case_variants(analyzed, capsys):
-    (group,) = group_substitutions(analyzed.feature_substitutions["ss02"])
+    (group,) = group_examples(analyzed.feature_examples["ss02"])
 
     assert sorted(group.all_input_chars) == ["AB", "Ab", "aB", "ab"]
     assert group.input_pattern == group.input_chars
@@ -429,14 +429,14 @@ def test_grouping_folds_case_variants(analyzed, capsys):
 
 
 def test_grouping_shows_alternatives_per_position():
-    (group,) = group_substitutions(_subs_to("‰", "0/00", "0/0⁰", "0⁄00", "0⁄0⁰"))
+    (group,) = group_examples(_subs_to("‰", "0/00", "0/0⁰", "0⁄00", "0⁄0⁰"))
 
     assert group.input_pattern == "0[/⁄]0[0⁰]"
     assert group.input_summary == "4 inputs"
 
 
 def test_grouping_without_common_pattern():
-    (group,) = group_substitutions(_subs_to("x", "ab", "cd", "ef", "gh"))
+    (group,) = group_examples(_subs_to("x", "ab", "cd", "ef", "gh"))
 
     assert group.input_alternatives is None
     assert group.input_pattern == "ab"
@@ -449,7 +449,7 @@ def test_grouping_keeps_small_groups_and_order():
         *_subs_to("y", "dd"),
         *_subs_to("x", "ee"),
     ]
-    assert group_substitutions(subs) == subs
+    assert group_examples(subs) == subs
 
 
 def test_feature_heading_stays_with_its_table(analyzed):
