@@ -34,7 +34,7 @@ if TYPE_CHECKING:
 PUA_START = 0xF0000
 
 # PDF Layout Constants
-PAGE_BREAK_THRESHOLD = 250
+HEADING_HEIGHT = 10
 ROW_HEIGHT = 8
 PAGE_BOTTOM_MARGIN = 275
 ROW_LABEL_WIDTH = 15
@@ -746,12 +746,7 @@ def _render_compact_table(
         cell_labels = [analyzer.get_cell_label(sub) for sub, _width in chunk]
         has_labels = any(cell_labels)
 
-        rows_to_render = 3 if show_diff else 2
-        total_chunk_height = rows_to_render * ROW_HEIGHT + 4
-        if has_labels:
-            total_chunk_height += CELL_LABEL_HEIGHT
-
-        if y + total_chunk_height > PAGE_BOTTOM_MARGIN:
+        if y + _chunk_height(show_diff, has_labels) > PAGE_BOTTOM_MARGIN:
             pdf.add_page()
             y = 15
 
@@ -764,6 +759,12 @@ def _render_compact_table(
         y += 4  # Padding between chunks
 
     return y
+
+
+def _chunk_height(show_diff: bool, has_labels: bool) -> float:
+    """Return the height of one chunk of the compact table, including padding."""
+    rows_to_render = 3 if show_diff else 2
+    return rows_to_render * ROW_HEIGHT + 4 + (CELL_LABEL_HEIGHT if has_labels else 0)
 
 
 def _get_next_sub_chunk(
@@ -1201,7 +1202,9 @@ def _render_feature(
     if subs:
         friendly_name = analyzer.get_tag_name(tag)
 
-        if pdf.get_y() > PAGE_BREAK_THRESHOLD:
+        # Keep the heading together with the first chunk of its table
+        first_chunk_height = _chunk_height(show_diff, has_labels=True)
+        if pdf.get_y() + HEADING_HEIGHT + first_chunk_height > PAGE_BOTTOM_MARGIN:
             pdf.add_page()
 
         pdf.start_section(f"{tag}: {friendly_name}", level=0)
@@ -1209,7 +1212,7 @@ def _render_feature(
         pdf.set_text_color(0)
         pdf.cell(
             0,
-            10,
+            HEADING_HEIGHT,
             f"Feature: {analyzer.get_feature_heading(tag)}",
             new_x=XPos.LMARGIN,
             new_y=YPos.NEXT,

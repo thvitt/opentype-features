@@ -4,12 +4,15 @@ from unittest.mock import MagicMock
 import pytest
 from fontFeatures import Substitution as FFSubstitution
 from fontTools.ttLib import TTFont
+from fpdf import FPDF
 
 from opentype_features import (
+    PAGE_BOTTOM_MARGIN,
     PUA_START,
     FontAnalyzer,
     Substitution,
     VisualComparator,
+    _render_feature,
     get_feature_priority,
     group_substitutions,
     is_character_variant,
@@ -447,3 +450,19 @@ def test_grouping_keeps_small_groups_and_order():
         *_subs_to("x", "ee"),
     ]
     assert group_substitutions(subs) == subs
+
+
+def test_feature_heading_stays_with_its_table(analyzed):
+    pdf = FPDF()
+    pdf.set_auto_page_break(False)
+    pdf.add_font("TargetFont", fname=str(analyzed.font_path))
+    pdf.add_page()
+    pdf.set_y(PAGE_BOTTOM_MARGIN - 30)
+    section_pages = []
+    pdf.start_section = lambda *_args, **_kwargs: section_pages.append(pdf.page)
+
+    _render_feature(
+        pdf, analyzed, VisualComparator(analyzed.font_path), "smcp", True, 0.0
+    )
+
+    assert section_pages == [2]
