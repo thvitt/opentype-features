@@ -31,6 +31,7 @@ GLYPH_ORDER = [
     "B",
     "warning",
     "acutecomb",
+    "c.swsh",
 ]
 
 CMAP = {ord(name): name for name in "abcdfiAB"} | {
@@ -57,6 +58,7 @@ feature dlig { sub b' lookup ALT c' lookup SC lookup ALT; } dlig;
 feature cv01 { sub d from [d.alt1 d.alt2]; } cv01;
 feature salt { sub b from [b.alt c.alt]; } salt;
 feature ss02 { sub [a A] [b B] by warning; } ss02;
+feature aalt { feature salt; sub c from [c.alt c.swsh]; } aalt;
 
 markClass acutecomb <anchor 100 700> @TOP;
 feature kern { pos a b -150; pos [c d] a 120; } kern;

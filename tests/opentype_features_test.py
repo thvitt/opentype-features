@@ -10,6 +10,7 @@ from opentype_features import (
     FeatureExample,
     FontAnalyzer,
     VisualComparator,
+    collect_examples,
     get_feature_priority,
     group_examples,
     is_character_variant,
@@ -441,6 +442,39 @@ def test_positioning_prefers_encoded_inputs(analyzer, monkeypatch):
     analyzer.analyze()
 
     assert [e.input_chars for e in analyzer.feature_examples["kern"]] == ["AV"]
+
+
+def test_aalt_comes_last():
+    tags = ["aalt", "smcp", "liga", "ss01"]
+
+    assert sorted(tags, key=get_feature_priority)[-1] == "aalt"
+
+
+def test_aalt_only_alternates_are_marked(analyzed):
+    aalt_only = {
+        example.output_glyphs: example.aalt_only
+        for example in analyzed.feature_examples["aalt"]
+        if example.input_glyphs == "c"
+    }
+
+    assert aalt_only == {"c.alt": False, "c.swsh": True}
+
+
+def test_aalt_alternates_of_other_features_are_not_marked(analyzed):
+    assert not any(
+        example.aalt_only
+        for example in analyzed.feature_examples["aalt"]
+        if example.input_glyphs == "b"
+    )
+
+
+def test_hide_aalt_only(analyzed):
+    comparator = VisualComparator(analyzed.font_path)
+
+    examples = collect_examples(analyzed, comparator, hide_aalt_only=True)
+
+    assert examples["aalt"]
+    assert not any(example.aalt_only for example in examples["aalt"])
 
 
 def test_controls_and_surrogates_are_not_used_as_characters(test_font, tmp_path):

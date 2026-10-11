@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator, Mapping
 
-    from fontFeatures import Routine, Rule
+    from fontFeatures import FontFeatures, Routine, Rule
 
 # Private Use Area for rendering unmapped glyphs
 # Use Supplementary Private Use Area-A to avoid 0xFFFF boundary
@@ -107,6 +107,8 @@ class FeatureExample:
     positioning: bool = False
     # Main value of a positioning adjustment in font units, e.g. the kerning
     adjustment: int = 0
+    # Alternates of aalt that no other feature produces and no character encodes
+    aalt_only: bool = False
 
     @property
     def has_unencoded_input(self) -> bool:
@@ -633,6 +635,27 @@ class FontAnalyzer:
                     *strongest[:MAX_POSITIONING_EXAMPLES],
                 ]
 
+        if "aalt" in self.feature_examples:
+            self._mark_aalt_only(ff)
+
+    def _mark_aalt_only(self, ff: FontFeatures) -> None:
+        """Flag the aalt examples whose alternates are reachable through aalt only."""
+        reachable = {
+            self.pua_map[glyph]
+            for glyph in _substitution_outputs(ff, exclude_tag="aalt")
+            if glyph in self.pua_map
+        }
+        self.feature_examples["aalt"] = [
+            replace(
+                example,
+                aalt_only=all(
+                    ord(char) >= PUA_START and char not in reachable
+                    for char in example.output_chars
+                ),
+            )
+            for example in self.feature_examples["aalt"]
+        ]
+
     def _process_rule(
         self,
         rule: Rule,
@@ -897,6 +920,34 @@ def _match_substitution(
     return None
 
 
+def _substitution_outputs(ff: FontFeatures, exclude_tag: str) -> set[str]:
+    """Return the glyphs that the substitutions of all other features produce."""
+    outputs: set[str] = set()
+    visited: set[int] = set()
+
+    def visit(routine: Routine | None) -> None:
+        if routine is None or id(routine) in visited:
+            return
+        visited.add(id(routine))
+        for rule in routine.rules:
+            if isinstance(rule, Substitution):
+                outputs.update(glyph for cls in rule.replacement for glyph in cls)
+            elif isinstance(rule, Chaining):
+                for position_lookups in rule.lookups:
+                    for lookup in position_lookups or []:
+                        visit(
+                            lookup.routine
+                            if isinstance(lookup, RoutineReference)
+                            else lookup
+                        )
+
+    for tag, routine_refs in ff.features.items():
+        if tag != exclude_tag:
+            for ref in routine_refs:
+                visit(ref.routine)
+    return outputs
+
+
 def _main_adjustment(rule: Positioning) -> int:
     """Return the first non-zero value of a positioning rule's value records."""
     fields = ("xAdvance", "xPlacement", "yPlacement", "yAdvance")
@@ -969,11 +1020,14 @@ def get_feature_priority(tag: str) -> tuple[int, str]:
     # 50: Character Variants
     # 60: General/Remaining
     # 70: Smaller/Shifted
+    # 90: Access All Alternates, which repeats the other features
 
     priority = 60  # Default: General
 
     if tag in {"lnum", "onum", "pnum", "tnum"}:
         priority = 10
+    elif tag == "aalt":
+        priority = 90
     elif tag == "liga":
         priority = 20
     elif tag in {"clig", "dlig", "hlig", "rlig"}:
@@ -1042,26 +1096,48 @@ def score_examples(
 
 
 def collect_examples(
-    analyzer: FontAnalyzer, comparator: VisualComparator, min_ratio: float = 0.0
+    analyzer: FontAnalyzer,
+    comparator: VisualComparator,
+    min_ratio: float = 0.0,
+    hide_aalt_only: bool = False,
 ) -> dict[str, list[FeatureExample]]:
     """Return the visible examples per feature, grouped and in report order."""
     return {
         tag: group_examples(
-            score_examples(analyzer.feature_examples[tag], comparator, min_ratio)
+            score_examples(
+                [
+                    example
+                    for example in analyzer.feature_examples[tag]
+                    if not (hide_aalt_only and example.aalt_only)
+                ],
+                comparator,
+                min_ratio,
+            )
         )
         for tag in sorted(analyzer.feature_examples, key=get_feature_priority)
     }
 
 
 def feature_notes(
-    analyzer: FontAnalyzer, tag: str, examples: list[FeatureExample]
+    analyzer: FontAnalyzer,
+    tag: str,
+    examples: list[FeatureExample],
+    hide_aalt_only: bool = False,
 ) -> list[str]:
     """Describe which of the feature's examples are not shown individually."""
     notes = []
     if total := analyzer.positioning_totals.get(tag):
         notes.append(f"{MAX_POSITIONING_EXAMPLES} strongest of {total} positionings")
+    all_examples = analyzer.feature_examples[tag]
+    aalt_only_hidden = sum(e.aalt_only for e in all_examples) if hide_aalt_only else 0
+    if aalt_only_hidden:
+        notes.append(f"{aalt_only_hidden} only reachable via aalt hidden")
+    if aalt_only_shown := sum(
+        1 + len(e.input_variants) for e in examples if e.aalt_only
+    ):
+        notes.append(f"{aalt_only_shown} only reachable via aalt (outlined)")
     shown_inputs = sum(1 + len(e.input_variants) for e in examples)
-    if hidden := len(analyzer.feature_examples[tag]) - shown_inputs:
+    if hidden := len(all_examples) - aalt_only_hidden - shown_inputs:
         notes.append(f"{hidden} invisible or too subtle")
     if folded := sum(len(e.input_variants) for e in examples):
         notes.append(f"{folded} similar inputs folded")

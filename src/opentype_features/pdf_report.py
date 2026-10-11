@@ -55,6 +55,7 @@ INPUT = (150, 150, 150)
 TILE = (244, 244, 244)
 PILL = (228, 228, 228)
 SUBTLE_CHANGE = (198, 40, 40)
+AALT_ONLY = (106, 27, 154)
 DEFAULT_ON = ((46, 125, 50), (232, 245, 233))
 DEFAULT_IN_CONTEXT = ((191, 87, 0), (255, 243, 224))
 
@@ -102,6 +103,7 @@ def render_pdf_report(
     actual_font_path: Path,
     comparator: VisualComparator,
     show_diff: bool = False,
+    hide_aalt_only: bool = False,
 ) -> None:
     """Write a PDF report of the examples of each feature."""
     family = analyzer.get_name(16) or analyzer.get_name(1) or analyzer.font_path.stem
@@ -137,6 +139,7 @@ def render_pdf_report(
                 examples_by_tag[tag],
                 show_diff,
                 links[tag],
+                hide_aalt_only,
             )
         except Exception:
             logger.exception("Could not render feature %s", tag)
@@ -166,7 +169,8 @@ def _render_title(pdf: ReportPDF, analyzer: FontAnalyzer, name: str) -> None:
         3.5,
         "Each example shows its input without the feature (gray) and with it "
         "(black); red marks subtle changes. Badges mark features that HarfBuzz "
-        "applies by default, everywhere or in some contexts only.",
+        "applies by default, everywhere or in some contexts only. Outlined "
+        "alternates are reachable through Access All Alternates (aalt) only.",
         new_x="LMARGIN",
         new_y="NEXT",
     )
@@ -253,6 +257,7 @@ def _render_feature(
     examples: list[FeatureExample],
     show_diff: bool,
     link: int,
+    hide_aalt_only: bool = False,
 ) -> None:
     """Render the heading and example tiles of a single feature."""
     rows = _layout_rows(pdf, analyzer, examples)
@@ -268,7 +273,7 @@ def _render_feature(
     pdf.cell(pdf.get_string_width(name) + 2, HEADING_HEIGHT - 2, name)
     if badge := _default_badge(analyzer, tag):
         _render_badge(pdf, *badge, x=pdf.get_x(), y=pdf.get_y() + 2)
-    if notes := feature_notes(analyzer, tag, examples):
+    if notes := feature_notes(analyzer, tag, examples, hide_aalt_only):
         pdf.set_ui_font("", 7)
         pdf.set_text_color(*MUTED)
         pdf.set_x(MARGIN)
@@ -383,6 +388,10 @@ def _render_tile(
     example = tile.example
     pdf.set_fill_color(*TILE)
     pdf.rect(x, y, tile.width, height, style="F", round_corners=True, corner_radius=1)
+    if example.aalt_only:
+        pdf.set_draw_color(*AALT_ONLY)
+        pdf.set_line_width(0.35)
+        pdf.rect(x, y, tile.width, height, round_corners=True, corner_radius=1)
     line_y = y + TILE_PADDING
 
     if has_labels:
