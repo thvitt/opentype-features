@@ -11,6 +11,7 @@ from opentype_features import (
     VisualComparator,
     get_feature_priority,
     is_character_variant,
+    score_substitutions,
 )
 
 
@@ -178,26 +179,35 @@ def test_substitution_has_one_to_one_chars():
     assert sub4.has_one_to_one_chars
 
 
-def test_visual_comparator_eb_garamond():
-    """Test VisualComparator with a real font."""
-    font_path = Path("EBGaramond12-Regular.ttf")
-    if not font_path.exists():
-        pytest.skip("EBGaramond12-Regular.ttf not found")
+@pytest.fixture
+def analyzed(test_font):
+    """A FontAnalyzer that has analyzed the synthetic test font."""
+    a = FontAnalyzer(test_font)
+    a.analyze()
+    return a
 
-    vc = VisualComparator(font_path)
 
-    # Small caps: a -> A.sc
+def _scored(analyzer, tag, font_path=None):
+    comparator = VisualComparator(font_path or analyzer.font_path)
+    return score_substitutions(analyzer.feature_substitutions[tag], comparator)
+
+
+def test_visual_comparator(test_font):
+    vc = VisualComparator(test_font)
+
     assert vc.is_visually_different("a", "smcp")
     total_diff, ratio_diff = vc.get_difference_score("a", "smcp")
     diff_threshold = 0.01
-    assert total_diff > diff_threshold  # Should see some difference
+    assert total_diff > diff_threshold
     assert ratio_diff > diff_threshold
 
-    # Feature 'smcp' should not change digit '0'
-    assert not vc.is_visually_different("0", "smcp")
-    t_diff, r_diff = vc.get_difference_score("0", "smcp")
-    assert t_diff == 0.0
-    assert r_diff == 0.0
+    assert not vc.is_visually_different("b", "smcp")
+    assert vc.get_difference_score("b", "smcp") == (0.0, 0.0)
+
+
+@pytest.mark.parametrize("tag", ["liga", "calt"])
+def test_default_features_are_scored_as_different(analyzed, tag):
+    assert _scored(analyzed, tag)
 
 
 def test_is_character_variant():

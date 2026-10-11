@@ -31,6 +31,9 @@ COLUMN_RENDER_WIDTH = 15
 DIFF_THRESHOLD_NONE = 0.0001  # Technical but no visual difference
 DIFF_THRESHOLD_SMALL = 0.1  # Subtle visual difference
 
+# Default features disabled in both renderings so that their effect becomes visible
+BASELINE_FEATURES = {"liga": False, "calt": False, "kern": False}
+
 
 @dataclass(frozen=True)
 class Substitution:
@@ -168,10 +171,17 @@ class VisualComparator:
         img_off = Image.new("L", (w_large, h_large), 0)
         img_on = Image.new("L", (w_large, h_large), 0)
 
+        baseline = [f"-{tag}" for tag in BASELINE_FEATURES]
+
         # Render Off
         draw_off = ImageDraw.Draw(img_off)
         draw_off.text(
-            (self.size, baseline_y), text, font=self.pil_font, fill=255, anchor="ls"
+            (self.size, baseline_y),
+            text,
+            font=self.pil_font,
+            fill=255,
+            features=baseline,
+            anchor="ls",
         )
 
         # Render On
@@ -181,7 +191,7 @@ class VisualComparator:
             text,
             font=self.pil_font,
             fill=255,
-            features=[f"{feature_tag}={feature_value}"],
+            features=[*baseline, f"{feature_tag}={feature_value}"],
             anchor="ls",
         )
 
@@ -238,9 +248,8 @@ class VisualComparator:
             True if there's any difference in glyph IDs or positions.
 
         """
-        # Explicitly disable common defaults in 'off' state to ensure we see the change
-        off_features = {"liga": False, "calt": False, "kern": False}
-        on_features = {**off_features, feature_tag: feature_value}
+        off_features = BASELINE_FEATURES
+        on_features = {**BASELINE_FEATURES, feature_tag: feature_value}
 
         buf_off = hb.Buffer()  # type: ignore
         buf_off.add_str(text)
@@ -785,7 +794,7 @@ def _render_chunk_row(
                 pdf.set_text_color(200, 50, 50)
                 pdf.set_text_shaping(
                     use_shaping_engine=True,
-                    features={tag: sub.feature_value},  # type: ignore[bad-argument-type]
+                    features={**BASELINE_FEATURES, tag: sub.feature_value},  # type: ignore[bad-argument-type]
                 )
                 pdf.cell(width, ROW_HEIGHT, sub.input_chars, align="C")
             else:
@@ -793,7 +802,7 @@ def _render_chunk_row(
                 pdf.set_text_color(0)
                 pdf.set_text_shaping(
                     use_shaping_engine=True,
-                    features={tag: sub.feature_value},  # type: ignore[bad-argument-type]
+                    features={**BASELINE_FEATURES, tag: sub.feature_value},  # type: ignore[bad-argument-type]
                 )
                 pdf.cell(width, ROW_HEIGHT, sub.input_chars, align="C")
 
@@ -953,6 +962,20 @@ def get_feature_priority(tag: str) -> tuple[int, str]:
     return (priority, tag)
 
 
+def score_substitutions(
+    subs: list[Substitution], comparator: VisualComparator, min_ratio: float = 0.0
+) -> list[Substitution]:
+    """Return the visibly changing substitutions, annotated with their scores."""
+    scored = []
+    for sub in subs:
+        diff_total, diff_ratio = comparator.get_difference_score(
+            sub.input_chars, sub.feature_tag, sub.languages, sub.feature_value
+        )
+        if diff_total > DIFF_THRESHOLD_NONE and diff_ratio >= min_ratio:
+            scored.append(replace(sub, diff_total=diff_total, diff_ratio=diff_ratio))
+    return scored
+
+
 def render_pdf_report(
     analyzer: FontAnalyzer,
     output_path: Path,
@@ -988,22 +1011,12 @@ def render_pdf_report(
     )
 
     for tag in remaining_tags:
-        # Calculate differences and filter
-        scored_subs = []
-        for s in analyzer.feature_substitutions[tag]:
-            diff_total, diff_ratio = comparator.get_difference_score(
-                s.input_chars, tag, s.languages, s.feature_value
-            )
-            # Filter by total diff (technical change) and user-specified ratio
-            if diff_total > DIFF_THRESHOLD_NONE and diff_ratio >= min_ratio:
-                scored_subs.append(
-                    replace(s, diff_total=diff_total, diff_ratio=diff_ratio)
-                )
-
-        if not scored_subs:
+        subs = score_substitutions(
+            analyzer.feature_substitutions[tag], comparator, min_ratio
+        )
+        if not subs:
             continue
 
-        subs = scored_subs
         friendly_name = analyzer.get_tag_name(tag)
 
         if pdf.get_y() > PAGE_BREAK_THRESHOLD:
