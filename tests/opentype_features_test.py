@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -355,6 +356,30 @@ def test_grouping_without_common_pattern():
     assert group.input_alternatives is None
     assert group.input_pattern == "ab"
     assert group.input_summary == "4 inputs"
+
+
+def test_grouping_keeps_differently_shaped_outputs_apart():
+    subs = [
+        replace(sub, shaped_output=(index,))
+        for index, sub in enumerate(_subs_to("x", "a", "b", "c", "d"))
+    ]
+
+    assert group_examples(subs) == subs
+
+
+def test_intermediate_steps_are_dropped(analyzed):
+    inputs = {example.input_chars for example in analyzed.feature_examples["ss03"]}
+
+    assert inputs == {"/=", "!="}
+
+
+def test_two_step_ligatures_are_not_folded(analyzed):
+    comparator = VisualComparator(analyzed.font_path)
+    examples = score_examples(analyzed.feature_examples["ss03"], comparator)
+
+    first, second = examples
+    assert first.output_chars == second.output_chars
+    assert first.shaped_output != second.shaped_output
 
 
 def test_grouping_keeps_small_groups_and_order():

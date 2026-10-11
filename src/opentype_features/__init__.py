@@ -109,6 +109,8 @@ class FeatureExample:
     adjustment: int = 0
     # Alternates of aalt that no other feature produces and no character encodes
     aalt_only: bool = False
+    # Glyph IDs HarfBuzz produces for the input with the feature applied
+    shaped_output: tuple[int, ...] = ()
 
     @property
     def has_unencoded_input(self) -> bool:
@@ -351,6 +353,18 @@ class VisualComparator:
             buf.language = language
         hb.shape(self.font, buf, features)  # type: ignore
         return buf
+
+    def shaped_output(
+        self,
+        text: str,
+        feature_tag: str,
+        languages: tuple[str, ...] = (),
+        feature_value: int = 1,
+    ) -> tuple[int, ...]:
+        """Return the glyph IDs of the text shaped with the feature."""
+        features = {**BASELINE_FEATURES, feature_tag: feature_value}
+        buf = self._shape(text, features, shaping_language(languages))
+        return tuple(info.codepoint for info in buf.glyph_infos)
 
     def is_visually_different(
         self,
@@ -630,6 +644,7 @@ class FontAnalyzer:
         self.feature_examples = {}
         for sub in result_map.values():
             self.feature_examples.setdefault(sub.feature_tag, []).append(sub)
+        self._drop_intermediate_steps(ff)
 
         self.positioning_totals = {}
         for tag, examples in self.feature_examples.items():
@@ -649,11 +664,34 @@ class FontAnalyzer:
         if "aalt" in self.feature_examples:
             self._mark_aalt_only(ff)
 
+    def _drop_intermediate_steps(self, ff: FontFeatures) -> None:
+        """
+        Drop examples whose input needs a glyph that the feature itself produces.
+
+        Such rules continue what other rules of the feature started, e.g. a
+        ligature built from a placeholder glyph, and the examples of those other
+        rules already show the result. Shaped on their own, they do not reproduce
+        the rule.
+        """
+        for tag, examples in self.feature_examples.items():
+            intermediate = {
+                self.pua_map[glyph]
+                for glyph in _substitution_outputs(ff, [tag])
+                if glyph in self.pua_map
+            }
+            self.feature_examples[tag] = [
+                example
+                for example in examples
+                if not intermediate.intersection(example.input_chars)
+            ]
+
     def _mark_aalt_only(self, ff: FontFeatures) -> None:
         """Flag the aalt examples whose alternates are reachable through aalt only."""
         reachable = {
             self.pua_map[glyph]
-            for glyph in _substitution_outputs(ff, exclude_tag="aalt")
+            for glyph in _substitution_outputs(
+                ff, [tag for tag in ff.features if tag != "aalt"]
+            )
             if glyph in self.pua_map
         }
         self.feature_examples["aalt"] = [
@@ -931,8 +969,8 @@ def _match_substitution(
     return None
 
 
-def _substitution_outputs(ff: FontFeatures, exclude_tag: str) -> set[str]:
-    """Return the glyphs that the substitutions of all other features produce."""
+def _substitution_outputs(ff: FontFeatures, tags: Iterable[str]) -> set[str]:
+    """Return the glyphs that the substitutions of the given features produce."""
     outputs: set[str] = set()
     visited: set[int] = set()
 
@@ -952,10 +990,9 @@ def _substitution_outputs(ff: FontFeatures, exclude_tag: str) -> set[str]:
                             else lookup
                         )
 
-    for tag, routine_refs in ff.features.items():
-        if tag != exclude_tag:
-            for ref in routine_refs:
-                visit(ref.routine)
+    for tag in tags:
+        for ref in ff.features.get(tag, []):
+            visit(ref.routine)
     return outputs
 
 
@@ -1071,14 +1108,23 @@ def get_feature_priority(tag: str) -> tuple[int, str]:
 
 def group_examples(subs: list[FeatureExample]) -> list[FeatureExample]:
     """Fold many equally long inputs producing the same output into one entry."""
-    groups: dict[tuple[str, int, int], list[FeatureExample]] = {}
+
+    def key(sub: FeatureExample) -> tuple[str, tuple[int, ...], int, int]:
+        # The rule's output may be an intermediate step that shapes differently
+        return (
+            sub.output_chars,
+            sub.shaped_output,
+            sub.feature_value,
+            len(sub.input_chars),
+        )
+
+    groups: dict[tuple[str, tuple[int, ...], int, int], list[FeatureExample]] = {}
     for sub in subs:
-        key = (sub.output_chars, sub.feature_value, len(sub.input_chars))
-        groups.setdefault(key, []).append(sub)
+        groups.setdefault(key(sub), []).append(sub)
 
     grouped = []
     for sub in subs:
-        group = groups[sub.output_chars, sub.feature_value, len(sub.input_chars)]
+        group = groups[key(sub)]
         if len(group) < MIN_GROUP_SIZE:
             grouped.append(sub)
         elif sub is group[0]:
@@ -1107,7 +1153,17 @@ def score_examples(
             )
             continue
         if diff_total > DIFF_THRESHOLD_NONE and diff_ratio >= min_ratio:
-            scored.append(replace(sub, diff_total=diff_total, diff_ratio=diff_ratio))
+            shaped_output = comparator.shaped_output(
+                sub.input_chars, sub.feature_tag, sub.languages, sub.feature_value
+            )
+            scored.append(
+                replace(
+                    sub,
+                    diff_total=diff_total,
+                    diff_ratio=diff_ratio,
+                    shaped_output=shaped_output,
+                )
+            )
     return scored
 
 

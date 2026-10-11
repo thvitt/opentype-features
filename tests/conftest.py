@@ -32,11 +32,20 @@ GLYPH_ORDER = [
     "warning",
     "acutecomb",
     "c.swsh",
+    "slash",
+    "exclam",
+    "equal",
+    "SPC",
+    "slash_equal.liga",
+    "exclam_equal.liga",
 ]
 
 CMAP = {ord(name): name for name in "abcdfiAB"} | {
     ord(" "): "space",
     0x0301: "acutecomb",
+    ord("/"): "slash",
+    ord("!"): "exclam",
+    ord("="): "equal",
 }
 
 FEATURES = """
@@ -47,6 +56,9 @@ languagesystem latn TRK;
 lookup ALT { sub b by b.alt; sub c by c.alt; } ALT;
 lookup SC { sub a by a.sc; } SC;
 lookup LIG { sub f i by f_i; } LIG;
+# Ligatures built in two steps through a placeholder, like in JetBrains Mono
+lookup SLASH_EQUAL { sub SPC equal' by slash_equal.liga; sub slash' equal by SPC; } SLASH_EQUAL;
+lookup EXCLAM_EQUAL { sub SPC equal' by exclam_equal.liga; sub exclam' equal by SPC; } EXCLAM_EQUAL;
 
 feature liga { sub f i by f_i; } liga;
 feature locl { script latn; language TRK exclude_dflt; sub i by i.TRK; } locl;
@@ -58,6 +70,7 @@ feature dlig { sub b' lookup ALT c' lookup SC lookup ALT; } dlig;
 feature cv01 { sub d from [d.alt1 d.alt2]; } cv01;
 feature salt { sub b from [b.alt c.alt]; } salt;
 feature ss02 { sub [a A] [b B] by warning; } ss02;
+feature ss03 { lookup SLASH_EQUAL; lookup EXCLAM_EQUAL; } ss03;
 feature aalt { feature salt; sub c from [c.alt c.swsh]; } aalt;
 
 markClass acutecomb <anchor 100 700> @TOP;
@@ -71,7 +84,7 @@ feature lfbd { pos [A B] <-100 0 -100 0>; } lfbd;
 def _draw_glyph(index: int) -> object:
     """Draw a box whose position and height are unique to the glyph."""
     pen = TTGlyphPen(None)
-    if index > 1:  # .notdef and space stay empty
+    if GLYPH_ORDER[index] not in {".notdef", "space", "SPC"}:
         left = 50 + (index % 4) * 40
         top = 300 + index * 30
         width = 600 if "_" in GLYPH_ORDER[index] else 300
