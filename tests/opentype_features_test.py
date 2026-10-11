@@ -2,6 +2,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from fontFeatures import Substitution as FFSubstitution
 
 from opentype_features import (
     PUA_START,
@@ -9,6 +10,7 @@ from opentype_features import (
     Substitution,
     VisualComparator,
     get_feature_priority,
+    is_character_variant,
 )
 
 
@@ -196,3 +198,52 @@ def test_visual_comparator_eb_garamond():
     t_diff, r_diff = vc.get_difference_score("0", "smcp")
     assert t_diff == 0.0
     assert r_diff == 0.0
+
+
+def test_is_character_variant():
+    assert is_character_variant("cv01")
+    assert is_character_variant("cv99")
+    assert not is_character_variant("ss01")
+    assert not is_character_variant("cvxx")
+
+
+def _alternate_rule(in_glyph, out_glyphs):
+    rule = MagicMock(spec=FFSubstitution)
+    rule.input = [[in_glyph]]
+    rule.replacement = [out_glyphs]
+    return rule
+
+
+def test_character_variant_alternates_get_feature_values(analyzer):
+    analyzer.reverse_cmap = {"a": ord("a")}
+    result_map = {}
+
+    analyzer._process_ff_substitution(
+        _alternate_rule("a", ["a.alt1", "a.alt2"]), "cv01", (), result_map
+    )
+
+    subs = sorted(result_map.values(), key=lambda s: s.feature_value)
+    assert [(s.output_glyphs, s.feature_value) for s in subs] == [
+        ("a.alt1", 1),
+        ("a.alt2", 2),
+    ]
+
+
+def test_variant_label_prefers_font_names(analyzer):
+    analyzer.variant_names = {"cv01": ["Round", ""]}
+    analyzer.tags_with_alternates = {"cv01"}
+
+    def label(value):
+        return analyzer.get_variant_label(
+            Substitution("a", "a", "a.alt", "x", "cv01", feature_value=value)
+        )
+
+    assert label(1) == "Round"
+    assert label(2) == "#2"
+    assert label(3) == "#3"
+
+
+def test_variant_label_empty_without_alternates(analyzer):
+    plain = Substitution("a", "a", "a.alt", "x", "cv02")
+    assert analyzer.get_variant_label(plain) == ""
+    assert analyzer.get_variant_label(Substitution("a", "a", "A", "A", "smcp")) == ""

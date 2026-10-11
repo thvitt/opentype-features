@@ -3,7 +3,7 @@
 import argparse
 import sys
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
@@ -44,6 +44,7 @@ class Substitution:
     languages: tuple[str, ...] = ()
     diff_total: float = 1.0
     diff_ratio: float = 1.0
+    feature_value: int = 1
 
     @property
     def has_one_to_one_chars(self) -> bool:
@@ -65,7 +66,11 @@ class VisualComparator:
         self.pil_font = ImageFont.truetype(str(font_path), self.size)
 
     def get_difference_score(
-        self, text: str, feature_tag: str, languages: tuple[str, ...] = ()
+        self,
+        text: str,
+        feature_tag: str,
+        languages: tuple[str, ...] = (),
+        feature_value: int = 1,
     ) -> tuple[float, float]:
         """
         Calculate difference scores between renderings.
@@ -77,11 +82,11 @@ class VisualComparator:
 
         """
         # First check if there's any technical difference
-        if not self.is_visually_different(text, feature_tag, languages):
+        if not self.is_visually_different(text, feature_tag, languages, feature_value):
             return 0.0, 0.0
 
         # Then measure pixel difference for small vs large
-        img_off, img_on = self._render_pair(text, feature_tag, languages)
+        img_off, img_on = self._render_pair(text, feature_tag, languages, feature_value)
 
         # Use numpy for pixel-wise difference
         mask_threshold = 128
@@ -106,7 +111,11 @@ class VisualComparator:
         return diff_total, diff_ratio
 
     def get_diff_image(
-        self, text: str, feature_tag: str, languages: tuple[str, ...] = ()
+        self,
+        text: str,
+        feature_tag: str,
+        languages: tuple[str, ...] = (),
+        feature_value: int = 1,
     ) -> Image.Image:
         """
         Create a visualization of differences between off and on renderings.
@@ -115,7 +124,7 @@ class VisualComparator:
         - Pixels only in 'off': red
         - Pixels only in 'on': green
         """
-        img_off, img_on = self._render_pair(text, feature_tag, languages)
+        img_off, img_on = self._render_pair(text, feature_tag, languages, feature_value)
 
         w, h = img_off.size
 
@@ -144,7 +153,11 @@ class VisualComparator:
         return Image.fromarray(diff_arr)
 
     def _render_pair(
-        self, text: str, feature_tag: str, languages: tuple[str, ...] = ()
+        self,
+        text: str,
+        feature_tag: str,
+        languages: tuple[str, ...] = (),
+        feature_value: int = 1,
     ) -> tuple[Image.Image, Image.Image]:
         """Render both off and on states aligned to the same baseline and fixed height."""
         # Use a very wide canvas initially
@@ -168,7 +181,7 @@ class VisualComparator:
             text,
             font=self.pil_font,
             fill=255,
-            features=[feature_tag],
+            features=[f"{feature_tag}={feature_value}"],
             anchor="ls",
         )
 
@@ -212,7 +225,11 @@ class VisualComparator:
         return img_off.crop(common_bbox), img_on.crop(common_bbox)
 
     def is_visually_different(
-        self, text: str, feature_tag: str, languages: tuple[str, ...] = ()
+        self,
+        text: str,
+        feature_tag: str,
+        languages: tuple[str, ...] = (),
+        feature_value: int = 1,
     ) -> bool:
         """
         Check if rendering with features is visually different from without.
@@ -223,7 +240,7 @@ class VisualComparator:
         """
         # Explicitly disable common defaults in 'off' state to ensure we see the change
         off_features = {"liga": False, "calt": False, "kern": False}
-        on_features = {**off_features, feature_tag: True}
+        on_features = {**off_features, feature_tag: feature_value}
 
         buf_off = hb.Buffer()  # type: ignore
         buf_off.add_str(text)
@@ -286,7 +303,10 @@ class FontAnalyzer:
         self.reverse_cmap = self._build_reverse_cmap()
         self.pua_map: dict[str, str] = {}
         self.feature_substitutions: dict[str, list[Substitution]] = {}
-        self.custom_feature_names: dict[str, str] = self._get_feature_name_map()
+        self.custom_feature_names: dict[str, str] = {}
+        self.variant_names: dict[str, list[str]] = {}
+        self.tags_with_alternates: set[str] = set()
+        self._read_feature_params()
 
     def _build_reverse_cmap(self) -> dict[str, int]:
         cmap = self.font.getBestCmap()
@@ -294,41 +314,72 @@ class FontAnalyzer:
             return {}
         return {v: k for k, v in cmap.items()}
 
-    def _get_feature_name_map(self) -> dict[str, str]:
-        """Extract custom feature names from the GSUB table parameters."""
-        name_map = {}
+    def _read_feature_params(self) -> None:
+        """Extract custom feature and variant names from the GSUB feature parameters."""
         if "GSUB" not in self.font:
-            return name_map
+            return
 
         gsub = self.font["GSUB"].table
         if not hasattr(gsub, "FeatureList") or not gsub.FeatureList:
-            return name_map
+            return
 
         for feature_record in gsub.FeatureList.FeatureRecord:
             tag = feature_record.FeatureTag
             params = feature_record.Feature.FeatureParams
-            if params and hasattr(params, "UINameID"):
-                name_id = params.UINameID
-                # Try Windows English, then Mac English
-                name_rec = self.font["name"].getName(name_id, 3, 1, 0x409)
-                if not name_rec:
-                    name_rec = self.font["name"].getName(name_id, 1, 0, 0)
+            if not params:
+                continue
 
-                # Fallback: search all names for this ID
-                if not name_rec:
-                    for record in self.font["name"].names:
-                        if record.nameID == name_id:
-                            name_rec = record
-                            break
+            # Stylistic sets use UINameID, character variants FeatUILabelNameID
+            label_id = getattr(params, "UINameID", None) or getattr(
+                params, "FeatUILabelNameID", None
+            )
+            if label_id and (name := self._get_name(label_id)):
+                self.custom_feature_names[tag] = name
 
-                if name_rec:
-                    name_map[tag] = name_rec.toUnicode()
+            first_param_id = getattr(params, "FirstParamUILabelNameID", 0)
+            if first_param_id:
+                self.variant_names[tag] = [
+                    self._get_name(first_param_id + i) or ""
+                    for i in range(params.NumNamedParameters)
+                ]
 
-        return name_map
+    def _get_name(self, name_id: int) -> str | None:
+        """Look up a string in the name table, preferring English entries."""
+        name_table = self.font["name"]
+        name_rec = name_table.getName(name_id, 3, 1, 0x409) or name_table.getName(
+            name_id, 1, 0, 0
+        )
+
+        # Fallback: search all names for this ID
+        if not name_rec:
+            name_rec = next(
+                (record for record in name_table.names if record.nameID == name_id),
+                None,
+            )
+
+        return name_rec.toUnicode() if name_rec else None
 
     def get_tag_name(self, tag: str) -> str:
         """Return the friendly name for an OpenType feature tag."""
         return self.custom_feature_names.get(tag, FEATURE_NAMES.get(tag, tag))
+
+    def get_variant_label(self, sub: Substitution) -> str:
+        """Return a label for the alternate a character variant substitution selects."""
+        if not is_character_variant(sub.feature_tag):
+            return ""
+        names = self.variant_names.get(sub.feature_tag, [])
+        index = sub.feature_value - 1
+        if index < len(names) and names[index]:
+            return names[index]
+        if sub.feature_tag in self.tags_with_alternates:
+            return f"#{sub.feature_value}"
+        return ""
+
+    def get_cell_label(self, sub: Substitution) -> str:
+        """Return the small label shown above a substitution in the report."""
+        if sub.feature_tag == "locl" and sub.languages:
+            return ",".join(self.get_language_name(lang) for lang in sub.languages)
+        return self.get_variant_label(sub)
 
     def get_language_name(self, lang_tag: str) -> str:
         """Return the friendly name for an OpenType language tag."""
@@ -415,6 +466,10 @@ class FontAnalyzer:
         result_map: dict[tuple[str, str, str], Substitution],
     ) -> None:
         """Process a standard fontFeatures Substitution rule."""
+        if is_character_variant(tag) and _is_alternate_substitution(rule):
+            self._process_ff_alternates(rule, tag, langs, result_map)
+            return
+
         # For now, simplify by taking the first glyph of any class
         in_glyphs = [g[0] for g in rule.input]
         out_glyphs = [g[0] for g in rule.replacement]
@@ -428,6 +483,31 @@ class FontAnalyzer:
         self._add_to_result_map(
             tag, in_chars, out_chars, display_in, display_out, langs, result_map
         )
+
+    def _process_ff_alternates(
+        self,
+        rule: FFSubstitution,
+        tag: str,
+        langs: tuple[str, ...],
+        result_map: dict[tuple[str, str, str], Substitution],
+    ) -> None:
+        """Add one substitution per alternate, selected by the feature value."""
+        self.tags_with_alternates.add(tag)
+        in_glyph = rule.input[0][0]
+        in_char = self.get_glyph_info(in_glyph)[0]
+        display_in = self.get_display_name(in_glyph)
+
+        for value, out_glyph in enumerate(rule.replacement[0], start=1):
+            self._add_to_result_map(
+                tag,
+                in_char,
+                self.get_glyph_info(out_glyph)[0],
+                display_in,
+                self.get_display_name(out_glyph),
+                langs,
+                result_map,
+                feature_value=value,
+            )
 
     def _process_ff_chaining(
         self,
@@ -495,6 +575,7 @@ class FontAnalyzer:
         display_out: str,
         langs: tuple[str, ...],
         result_map: dict[tuple[str, str, str], Substitution],
+        feature_value: int = 1,
     ) -> None:
         """Add or combine a substitution in the result map."""
         key = (tag, in_chars, out_chars)
@@ -506,18 +587,12 @@ class FontAnalyzer:
                 output_chars=out_chars,
                 feature_tag=tag,
                 languages=langs,
+                feature_value=feature_value,
             )
         else:
             existing = result_map[key]
             new_langs = tuple(sorted(set(existing.languages + langs)))
-            result_map[key] = Substitution(
-                input_glyphs=existing.input_glyphs,
-                input_chars=existing.input_chars,
-                output_glyphs=existing.output_glyphs,
-                output_chars=existing.output_chars,
-                feature_tag=existing.feature_tag,
-                languages=new_langs,
-            )
+            result_map[key] = replace(existing, languages=new_langs)
 
     def create_modified_font(self) -> Path:
         """Create a temporary font file with unmapped glyphs added to the cmap."""
@@ -574,7 +649,7 @@ def _render_compact_table(
         total_chunk_height = rows_to_render * ROW_HEIGHT + 5
 
         # Extra height for labels if needed
-        if any(s.feature_tag == "locl" and s.languages for s, w in chunk):
+        if any(analyzer.get_cell_label(s) for s, w in chunk):
             total_chunk_height += 3
 
         if y + total_chunk_height > PAGE_BOTTOM_MARGIN:
@@ -673,7 +748,9 @@ def _render_chunk_row(
         x_pos = pdf.get_x()
         if mode == "diff":
             # Render diff bitmap ONLY in diff mode
-            diff_img = comparator.get_diff_image(sub.input_chars, tag, sub.languages)
+            diff_img = comparator.get_diff_image(
+                sub.input_chars, tag, sub.languages, sub.feature_value
+            )
 
             # Constant resolution: scale based on fixed pixel height
             # Font height in pixels: ascent + descent + 20% padding
@@ -706,12 +783,18 @@ def _render_chunk_row(
 
                 pdf.set_xy(x_pos, y)
                 pdf.set_text_color(200, 50, 50)
-                pdf.set_text_shaping(use_shaping_engine=True, features={tag: True})
+                pdf.set_text_shaping(
+                    use_shaping_engine=True,
+                    features={tag: sub.feature_value},  # type: ignore[bad-argument-type]
+                )
                 pdf.cell(width, ROW_HEIGHT, sub.input_chars, align="C")
             else:
                 # Normal 'on' rendering
                 pdf.set_text_color(0)
-                pdf.set_text_shaping(use_shaping_engine=True, features={tag: True})
+                pdf.set_text_shaping(
+                    use_shaping_engine=True,
+                    features={tag: sub.feature_value},  # type: ignore[bad-argument-type]
+                )
                 pdf.cell(width, ROW_HEIGHT, sub.input_chars, align="C")
 
             # Score label
@@ -732,26 +815,22 @@ def _render_chunk_row(
             pdf.set_text_shaping(use_shaping_engine=False)
             pdf.cell(width, ROW_HEIGHT, sub.input_chars, align="C")
 
-        if mode == "on" and sub.feature_tag == "locl" and sub.languages:
-            _draw_locl_labels(pdf, x_pos, y, width, sub.languages, analyzer)
+        if mode == "on" and (cell_label := analyzer.get_cell_label(sub)):
+            _draw_cell_label(pdf, x_pos, y, width, cell_label)
 
     return y + ROW_HEIGHT
 
 
-def _draw_locl_labels(
-    pdf: FPDF,
-    x: float,
-    y: float,
-    width: float,
-    languages: tuple[str, ...],
-    analyzer: FontAnalyzer,
-) -> None:
-    """Draw small language labels below localized substitutions."""
-    pdf.set_xy(x, y + ROW_HEIGHT - 2)
-    pdf.set_font("Helvetica", "I", 4)
+def _draw_cell_label(pdf: FPDF, x: float, y: float, width: float, text: str) -> None:
+    """Draw a small label above a substitution, e.g. its languages or variant."""
+    pdf.set_xy(x, y)
+    label_size = 4
+    pdf.set_font("Helvetica", "I", label_size)
+    text_width = pdf.get_string_width(text)
+    if text_width > width - 1:
+        pdf.set_font_size(label_size * (width - 1) / text_width)
     pdf.set_text_color(150)
-    langs = ",".join(analyzer.get_language_name(lang) for lang in languages)
-    pdf.cell(width, 2, langs, align="C")
+    pdf.cell(width, 2, text, align="C")
     # Position will be restored by the caller if needed, but we mostly care about text flow
     pdf.set_xy(x + width, y)
     pdf.set_font("TargetFont", "", 10)
@@ -813,6 +892,21 @@ def _render_figures_section(
     return y + 5
 
 
+def is_character_variant(tag: str) -> bool:
+    """Check whether a feature tag denotes a character variant (cv01–cv99)."""
+    return tag.startswith("cv") and tag[2:].isdigit()
+
+
+def _is_alternate_substitution(rule: FFSubstitution) -> bool:
+    """Check whether a rule offers several alternates for a single glyph."""
+    return (
+        len(rule.input) == 1
+        and len(rule.replacement) == 1
+        and len(rule.input[0]) == 1
+        and len(rule.replacement[0]) > 1
+    )
+
+
 def get_feature_priority(tag: str) -> tuple[int, str]:
     """Return a sorting priority for feature tags."""
     # Priority groups:
@@ -837,7 +931,7 @@ def get_feature_priority(tag: str) -> tuple[int, str]:
         priority = 30
     elif tag.startswith("ss") and tag[2:].isdigit():
         priority = 40
-    elif tag.startswith("cv") and tag[2:].isdigit():
+    elif is_character_variant(tag):
         priority = 50
     elif tag in {
         "smcp",
@@ -898,21 +992,12 @@ def render_pdf_report(
         scored_subs = []
         for s in analyzer.feature_substitutions[tag]:
             diff_total, diff_ratio = comparator.get_difference_score(
-                s.input_chars, tag, s.languages
+                s.input_chars, tag, s.languages, s.feature_value
             )
             # Filter by total diff (technical change) and user-specified ratio
             if diff_total > DIFF_THRESHOLD_NONE and diff_ratio >= min_ratio:
                 scored_subs.append(
-                    Substitution(
-                        input_glyphs=s.input_glyphs,
-                        input_chars=s.input_chars,
-                        output_glyphs=s.output_glyphs,
-                        output_chars=s.output_chars,
-                        feature_tag=s.feature_tag,
-                        languages=s.languages,
-                        diff_total=diff_total,
-                        diff_ratio=diff_ratio,
-                    )
+                    replace(s, diff_total=diff_total, diff_ratio=diff_ratio)
                 )
 
         if not scored_subs:
@@ -949,9 +1034,11 @@ def print_console_report(analyzer: FontAnalyzer) -> None:
         friendly_name = analyzer.get_tag_name(tag)
         print(f"\nFeature: {tag} ({friendly_name})")
         for sub in subs:
+            variant_label = analyzer.get_variant_label(sub)
             print(
                 f"  {sub.input_glyphs} ({sub.input_chars}) -> "
                 f"{sub.output_glyphs} ({sub.output_chars})"
+                + (f" [{variant_label}]" if variant_label else "")
             )
 
 
