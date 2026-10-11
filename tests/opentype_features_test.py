@@ -347,3 +347,14 @@ def test_pdf_report_without_diff(analyzed, tmp_path, recwarn):
 
     assert (tmp_path / "report.pdf").stat().st_size > 0
     assert not [w for w in recwarn if issubclass(w.category, DeprecationWarning)]
+
+
+def test_diff_image_reuses_scoring_renderings(test_font, monkeypatch):
+    vc = VisualComparator(test_font)
+    vc.get_difference_score("a", "smcp")
+    monkeypatch.setattr(vc, "_render_pair", MagicMock(side_effect=AssertionError))
+
+    image = vc.get_diff_image("a", "smcp")
+
+    assert image.mode == "RGB"
+    assert image.getpixel((0, 0)) == (255, 255, 255)

@@ -1,6 +1,7 @@
 """Analyze OpenType features in a font file and generate reports."""
 
 import argparse
+import functools
 import logging
 import sys
 import tempfile
@@ -41,6 +42,7 @@ CELL_LABEL_HEIGHT = 3
 # Visual Difference Thresholds
 DIFF_THRESHOLD_NONE = 0.0001  # Technical but no visual difference
 DIFF_THRESHOLD_SMALL = 0.1  # Subtle visual difference
+RENDER_CACHE_SIZE = 1024
 
 # Default features disabled in both renderings so that their effect becomes visible
 BASELINE_FEATURES = {"liga": False, "calt": False, "kern": False}
@@ -73,6 +75,8 @@ class VisualComparator:
         self.font = hb.Font(self.face)  # type: ignore
         self.size = 128
         self.pil_font = ImageFont.truetype(str(font_path), self.size)
+        # Scoring and the diff row of the report need the same renderings
+        self._masks = functools.lru_cache(maxsize=RENDER_CACHE_SIZE)(self._render_masks)
 
     def get_difference_score(
         self,
@@ -94,13 +98,7 @@ class VisualComparator:
         if not self.is_visually_different(text, feature_tag, languages, feature_value):
             return 0.0, 0.0
 
-        # Then measure pixel difference for small vs large
-        img_off, img_on = self._render_pair(text, feature_tag, languages, feature_value)
-
-        # Use numpy for pixel-wise difference
-        mask_threshold = 128
-        arr_off = np.array(img_off) > mask_threshold
-        arr_on = np.array(img_on) > mask_threshold
+        arr_off, arr_on = self._masks(text, feature_tag, languages, feature_value)
 
         common = np.sum(arr_off & arr_on)
         only_off = np.sum(arr_off & ~arr_on)
@@ -133,19 +131,11 @@ class VisualComparator:
         - Pixels only in 'off': red
         - Pixels only in 'on': green
         """
-        img_off, img_on = self._render_pair(text, feature_tag, languages, feature_value)
-
-        w, h = img_off.size
-
-        # Threshold to binary masks for logic
-        mask_threshold = 128
+        mask_off, mask_on = self._masks(text, feature_tag, languages, feature_value)
         pixel_max = 255
 
-        mask_off = np.array(img_off) > mask_threshold
-        mask_on = np.array(img_on) > mask_threshold
-
         # Create RGB image initialized to white
-        diff_arr = np.full((h, w, 3), pixel_max, dtype=np.uint8)
+        diff_arr = np.full((*mask_off.shape, 3), pixel_max, dtype=np.uint8)
 
         # Common pixels (light gray)
         common = mask_off & mask_on
@@ -160,6 +150,18 @@ class VisualComparator:
         diff_arr[only_on] = [0, 200, 0]
 
         return Image.fromarray(diff_arr)
+
+    def _render_masks(
+        self,
+        text: str,
+        feature_tag: str,
+        languages: tuple[str, ...],
+        feature_value: int,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Return the inked pixels of the off and on renderings."""
+        img_off, img_on = self._render_pair(text, feature_tag, languages, feature_value)
+        mask_threshold = 128
+        return np.array(img_off) > mask_threshold, np.array(img_on) > mask_threshold
 
     def _render_pair(
         self,
