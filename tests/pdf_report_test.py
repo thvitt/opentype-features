@@ -56,6 +56,7 @@ def test_tiles_wrap_into_rows(analyzed):
 
 def test_report_with_non_latin_feature_names(analyzed, tmp_path):
     analyzed.custom_feature_names["ss01"] = "Ελληνικά"
+    analyzed.custom_feature_names["ss02"] = "日本語\x00\udcff"
     comparator = VisualComparator(analyzed.font_path)
     examples = {
         tag: score_examples(examples, comparator)

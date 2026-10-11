@@ -12,6 +12,8 @@ repos:
       - id: check-symlinks
       - id: name-tests-test
       - id: check-added-large-files
+        # The bundled Unicode fonts for the report's own text
+        exclude: ^src/opentype_features/fonts/
   - repo: https://github.com/astral-sh/ruff-pre-commit
     # Ruff version.
     rev: v0.15.0

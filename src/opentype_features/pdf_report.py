@@ -1,8 +1,10 @@
 """PDF report of the OpenType features of a font."""
 
 import logging
+import unicodedata
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from pathlib import Path
+from typing import TYPE_CHECKING, Literal
 
 from fpdf import FPDF
 
@@ -14,8 +16,6 @@ from opentype_features import (
 )
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from opentype_features import (
         FeatureExample,
         FontAnalyzer,
@@ -40,6 +40,11 @@ LABEL_LINE = 2.6
 DIFF_HEIGHT = 6
 FIGURE_LABEL_WIDTH = 62
 
+# Unicode fonts for everything but the examples
+FONT_DIR = Path(__file__).parent / "fonts"
+UI_FONT = "DejaVuSans"
+TAG_FONT = "DejaVuSansMono"
+
 # Relative visual difference below which a change is highlighted
 SUBTLE_HIGHLIGHT_RATIO = 0.1
 
@@ -63,13 +68,21 @@ class ReportPDF(FPDF):
         self.footer_text = footer_text
         self.set_margins(MARGIN, MARGIN, MARGIN)
         self.set_auto_page_break(False)
+        self.add_font(UI_FONT, style="", fname=FONT_DIR / "DejaVuSans.ttf")
+        self.add_font(UI_FONT, style="B", fname=FONT_DIR / "DejaVuSans-Bold.ttf")
+        self.add_font(TAG_FONT, style="B", fname=FONT_DIR / "DejaVuSansMono-Bold.ttf")
+
+    def set_ui_font(self, style: Literal["", "B"], size: int) -> None:
+        """Select the font for headings, labels and notes, without shaping."""
+        self.set_font(UI_FONT, style, size)
+        self.set_text_shaping(use_shaping_engine=False)
 
     def footer(self) -> None:
         """Draw the footer of the current page."""
         self.set_xy(MARGIN, -10)
-        self.set_font("Helvetica", "", 7)
+        self.set_ui_font("", 7)
         self.set_text_color(*MUTED)
-        self.cell(CONTENT_WIDTH / 2, 4, _latin1(self.footer_text))
+        self.cell(CONTENT_WIDTH / 2, 4, _printable(self.footer_text))
         self.cell(CONTENT_WIDTH / 2, 4, str(self.page_no()), align="R")
 
 
@@ -95,6 +108,8 @@ def render_pdf_report(
     style = analyzer.get_name(17) or analyzer.get_name(2) or ""
     pdf = ReportPDF(f"{family} {style} · OpenType features")
     pdf.add_font("TargetFont", style="", fname=str(actual_font_path))
+    # Names in scripts DejaVu lacks are most likely covered by the font itself
+    pdf.set_fallback_fonts(["TargetFont"], exact_match=False)
     pdf.add_page()
 
     shown_tags = [tag for tag, examples in examples_by_tag.items() if examples]
@@ -129,17 +144,23 @@ def render_pdf_report(
     pdf.output(str(output_path))
 
 
-def _render_title(pdf: FPDF, analyzer: FontAnalyzer, name: str) -> None:
+def _render_title(pdf: ReportPDF, analyzer: FontAnalyzer, name: str) -> None:
     pdf.set_text_color(*TEXT)
-    pdf.set_font("Helvetica", "B", 18)
-    pdf.cell(0, 9, _latin1(name), new_x="LMARGIN", new_y="NEXT")
+    pdf.set_ui_font("B", 18)
+    pdf.cell(0, 9, _fit(pdf, name, CONTENT_WIDTH), new_x="LMARGIN", new_y="NEXT")
 
     details = [analyzer.font_path.name, f"{len(analyzer.font.getGlyphOrder())} glyphs"]
     if version := analyzer.get_name(5):
         details.insert(1, version)
-    pdf.set_font("Helvetica", "", 8)
+    pdf.set_ui_font("", 8)
     pdf.set_text_color(*MUTED)
-    pdf.cell(0, 5, _latin1(" · ".join(details)), new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(
+        0,
+        5,
+        _fit(pdf, " · ".join(details), CONTENT_WIDTH),
+        new_x="LMARGIN",
+        new_y="NEXT",
+    )
     pdf.multi_cell(
         0,
         3.5,
@@ -153,7 +174,7 @@ def _render_title(pdf: FPDF, analyzer: FontAnalyzer, name: str) -> None:
 
 
 def _render_overview(
-    pdf: FPDF,
+    pdf: ReportPDF,
     analyzer: FontAnalyzer,
     examples_by_tag: dict[str, list[FeatureExample]],
     shown_tags: list[str],
@@ -168,11 +189,11 @@ def _render_overview(
         x = MARGIN + (index // rows) * (column_width + 6)
         y = top + (index % rows) * row_height
         pdf.set_xy(x, y)
-        pdf.set_font("Courier", "B", 8)
+        pdf.set_font(TAG_FONT, "B", 8)
         pdf.set_text_color(*TEXT)
-        pdf.cell(11, row_height, tag, link=links[tag])
+        pdf.cell(11, row_height, _printable(tag), link=links[tag])
 
-        pdf.set_font("Helvetica", "", 8)
+        pdf.set_ui_font("", 8)
         name = _fit(pdf, analyzer.get_tag_name(tag), column_width - 42)
         pdf.cell(column_width - 42, row_height, name, link=links[tag])
 
@@ -181,14 +202,14 @@ def _render_overview(
             _render_badge(pdf, *badge, x=x + column_width - 31, y=y + 0.7)
 
         pdf.set_xy(x + column_width - 10, y)
-        pdf.set_font("Helvetica", "", 7)
+        pdf.set_ui_font("", 7)
         pdf.set_text_color(*MUTED)
         pdf.cell(10, row_height, str(len(examples_by_tag[tag])), align="R")
     pdf.set_y(top + rows * row_height + 4)
 
 
 def _render_figures(
-    pdf: FPDF, analyzer: FontAnalyzer, supported: set[str], link: int
+    pdf: ReportPDF, analyzer: FontAnalyzer, supported: set[str], link: int
 ) -> None:
     """Render the digits in all combinations of the figure features."""
     vertical = [None, *(tag for tag in ("lnum", "onum") if tag in supported)]
@@ -199,7 +220,7 @@ def _render_figures(
     _render_heading(pdf, "Figures", link, len(combinations) * row_height)
     pdf.start_section("Figures", level=0)
     _render_tag_pill(pdf, "figures")
-    pdf.set_font("Helvetica", "B", 11)
+    pdf.set_ui_font("B", 11)
     pdf.set_text_color(*TEXT)
     pdf.cell(0, HEADING_HEIGHT - 2, "Figures", new_x="LMARGIN", new_y="NEXT")
 
@@ -209,7 +230,7 @@ def _render_figures(
         if pdf.get_y() + row_height > PAGE_BOTTOM:
             pdf.add_page()
         pdf.set_x(MARGIN)
-        pdf.set_font("Helvetica", "", 8)
+        pdf.set_ui_font("", 8)
         pdf.set_text_color(*MUTED)
         label = " + ".join(analyzer.get_tag_name(tag) for tag in tags) or "Default"
         pdf.cell(
@@ -225,7 +246,7 @@ def _render_figures(
 
 
 def _render_feature(
-    pdf: FPDF,
+    pdf: ReportPDF,
     analyzer: FontAnalyzer,
     comparator: VisualComparator,
     tag: str,
@@ -238,17 +259,17 @@ def _render_feature(
     first_row_height = _row_height(rows[0], show_diff) if rows else 0
     _render_heading(pdf, tag, link, first_row_height)
 
-    friendly_name = analyzer.get_tag_name(tag)
-    pdf.start_section(_latin1(f"{tag}: {friendly_name}"), level=0)
+    friendly_name = _printable(analyzer.get_tag_name(tag))
+    pdf.start_section(_printable(f"{tag}: {friendly_name}"), level=0)
     _render_tag_pill(pdf, tag)
-    pdf.set_font("Helvetica", "B", 11)
+    pdf.set_ui_font("B", 11)
     pdf.set_text_color(*TEXT)
-    name = _latin1(friendly_name)
+    name = _fit(pdf, friendly_name, CONTENT_WIDTH / 2)
     pdf.cell(pdf.get_string_width(name) + 2, HEADING_HEIGHT - 2, name)
     if badge := _default_badge(analyzer, tag):
         _render_badge(pdf, *badge, x=pdf.get_x(), y=pdf.get_y() + 2)
     if notes := feature_notes(analyzer, tag, examples):
-        pdf.set_font("Helvetica", "", 7)
+        pdf.set_ui_font("", 7)
         pdf.set_text_color(*MUTED)
         pdf.set_x(MARGIN)
         pdf.cell(CONTENT_WIDTH, HEADING_HEIGHT - 2, " · ".join(notes), align="R")
@@ -277,7 +298,8 @@ def _render_heading(pdf: FPDF, tag: str, link: int, first_row_height: float) -> 
 
 
 def _render_tag_pill(pdf: FPDF, tag: str) -> None:
-    pdf.set_font("Courier", "B", 9)
+    tag = _printable(tag)
+    pdf.set_font(TAG_FONT, "B", 9)
     width = pdf.get_string_width(tag) + 3
     pdf.set_fill_color(*PILL)
     pdf.rect(MARGIN, pdf.get_y() + 1.3, width, 4.6, style="F", round_corners=True)
@@ -298,14 +320,14 @@ def _default_badge(
 
 
 def _render_badge(
-    pdf: FPDF,
+    pdf: ReportPDF,
     text: str,
     colors: tuple[tuple[int, int, int], tuple[int, int, int]],
     x: float,
     y: float,
 ) -> None:
     foreground, background = colors
-    pdf.set_font("Helvetica", "B", 6)
+    pdf.set_ui_font("B", 6)
     width = pdf.get_string_width(text) + 2.4
     pdf.set_fill_color(*background)
     pdf.rect(x, y, width, 3, style="F", round_corners=True)
@@ -315,20 +337,20 @@ def _render_badge(
 
 
 def _layout_rows(
-    pdf: FPDF, analyzer: FontAnalyzer, examples: list[FeatureExample]
+    pdf: ReportPDF, analyzer: FontAnalyzer, examples: list[FeatureExample]
 ) -> list[list[Tile]]:
     """Measure the examples' tiles and distribute them over rows."""
     rows: list[list[Tile]] = [[]]
     row_width = 0.0
     for example in examples:
-        label = _latin1(analyzer.get_cell_label(example))
+        label = _printable(analyzer.get_cell_label(example))
         pdf.set_font("TargetFont", "", GLYPH_SIZE)
         pdf.set_text_shaping(use_shaping_engine=False)
         glyph_width = max(
             pdf.get_string_width(example.input_pattern),
             pdf.get_string_width(example.output_chars),
         )
-        pdf.set_font("Helvetica", "", LABEL_SIZE)
+        pdf.set_ui_font("", LABEL_SIZE)
         label_width = min(pdf.get_string_width(label), MAX_LABEL_WIDTH)
         width = min(max(glyph_width, label_width) + 2 * TILE_PADDING + 1, CONTENT_WIDTH)
         tile = Tile(example, label, max(width, MIN_TILE_WIDTH))
@@ -348,7 +370,7 @@ def _row_height(row: list[Tile], show_diff: bool) -> float:
 
 
 def _render_tile(
-    pdf: FPDF,
+    pdf: ReportPDF,
     comparator: VisualComparator,
     tile: Tile,
     x: float,
@@ -365,7 +387,7 @@ def _render_tile(
 
     if has_labels:
         if tile.label:
-            pdf.set_font("Helvetica", "", LABEL_SIZE)
+            pdf.set_ui_font("", LABEL_SIZE)
             text_width = pdf.get_string_width(tile.label)
             available = tile.width - 2 * TILE_PADDING
             if text_width > available:
@@ -429,14 +451,21 @@ def _render_diff(
 
 def _fit(pdf: FPDF, text: str, width: float) -> str:
     """Shorten text with an ellipsis until it fits into width."""
-    text = _latin1(text)
+    text = _printable(text)
     if pdf.get_string_width(text) <= width:
         return text
-    while text and pdf.get_string_width(text + "...") > width:
+    while text and pdf.get_string_width(text + "…") > width:
         text = text[:-1]
-    return text + "..."
+    return text + "…"
 
 
-def _latin1(text: str) -> str:
-    """Replace characters the PDF core fonts cannot show."""
-    return text.encode("latin-1", "replace").decode("latin-1")
+def _printable(text: str) -> str:
+    """Replace control characters and lone surrogates, e.g. from broken name tables."""
+    return "".join(
+        " "
+        if unicodedata.category(char) == "Cc"
+        else "\ufffd"
+        if unicodedata.category(char) == "Cs"
+        else char
+        for char in text
+    )

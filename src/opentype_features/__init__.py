@@ -6,6 +6,7 @@ import itertools
 import logging
 import math
 import tempfile
+import unicodedata
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -430,7 +431,12 @@ class FontAnalyzer:
         cmap = self.font.getBestCmap()
         if cmap is None:
             return {}
-        return {v: k for k, v in cmap.items()}
+        # Controls and surrogates cannot be shaped or embedded, use the PUA instead
+        return {
+            glyph: codepoint
+            for codepoint, glyph in cmap.items()
+            if unicodedata.category(chr(codepoint)) not in {"Cc", "Cs"}
+        }
 
     def _read_feature_params(self) -> None:
         """Extract custom feature and variant names from the GSUB feature parameters."""
@@ -475,7 +481,7 @@ class FontAnalyzer:
                 None,
             )
 
-        return name_rec.toUnicode() if name_rec else None
+        return name_rec.toUnicode(errors="replace") if name_rec else None
 
     def detect_default_features(self, comparator: VisualComparator) -> None:
         """

@@ -441,3 +441,15 @@ def test_positioning_prefers_encoded_inputs(analyzer, monkeypatch):
     analyzer.analyze()
 
     assert [e.input_chars for e in analyzer.feature_examples["kern"]] == ["AV"]
+
+
+def test_controls_and_surrogates_are_not_used_as_characters(test_font, tmp_path):
+    font = TTFont(str(test_font))
+    for table in font["cmap"].tables:
+        table.cmap[0x0D] = "warning"
+    path = tmp_path / "Controls.ttf"
+    font.save(str(path))
+
+    analyzer = FontAnalyzer(path)
+
+    assert ord(analyzer.get_char("warning")) >= PUA_START
