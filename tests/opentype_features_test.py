@@ -302,3 +302,39 @@ def test_pdf_report_compares_with_modified_font(analyzed, tmp_path, monkeypatch)
 
     assert used_paths == [modified]
     assert (tmp_path / "report.pdf").stat().st_size > 0
+
+
+def _glyph_mappings(analyzer, tag):
+    return sorted(
+        (s.input_glyphs, s.output_glyphs) for s in analyzer.feature_substitutions[tag]
+    )
+
+
+def test_chaining_expands_input_classes(analyzed):
+    assert _glyph_mappings(analyzed, "calt") == [
+        ("b a", "b.alt a"),
+        ("c a", "c.alt a"),
+    ]
+
+
+def test_chaining_applies_nested_ligatures(analyzed):
+    assert _glyph_mappings(analyzed, "clig") == [("f i a", "f_i a")]
+
+
+def test_chaining_tries_all_lookups_at_each_position(analyzed):
+    assert _glyph_mappings(analyzed, "dlig") == [("b c", "b.alt c.alt")]
+
+
+def test_class_substitution_is_expanded(analyzer):
+    analyzer.reverse_cmap = {"a": ord("a"), "b": ord("b")}
+    rule = MagicMock(spec=FFSubstitution)
+    rule.input = [["a", "b"]]
+    rule.replacement = [["a.sc", "b.sc"]]
+    result_map = {}
+
+    analyzer._process_ff_substitution(rule, "smcp", (), result_map)
+
+    assert sorted((s.input_glyphs, s.output_glyphs) for s in result_map.values()) == [
+        ("a", "a.sc"),
+        ("b", "b.sc"),
+    ]

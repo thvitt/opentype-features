@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import uharfbuzz as hb
-from fontFeatures import Chaining
+from fontFeatures import Chaining, RoutineReference
 from fontFeatures import Substitution as FFSubstitution
 from fontFeatures.ttLib import unparse
 from fontTools.ttLib import TTFont
@@ -21,6 +21,8 @@ from opentype_features.feature_names import FEATURE_NAMES, LANGUAGE_NAMES
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+
+    from fontFeatures import Routine
 
 # Private Use Area for rendering unmapped glyphs
 # Use Supplementary Private Use Area-A to avoid 0xFFFF boundary
@@ -478,19 +480,16 @@ class FontAnalyzer:
             self._process_ff_alternates(rule, tag, langs, result_map)
             return
 
-        # For now, simplify by taking the first glyph of any class
-        in_glyphs = [g[0] for g in rule.input]
-        out_glyphs = [g[0] for g in rule.replacement]
-
-        in_chars = "".join(self.get_glyph_info(g)[0] for g in in_glyphs)
-        out_chars = "".join(self.get_glyph_info(g)[0] for g in out_glyphs)
-
-        display_in = " ".join(self.get_display_name(g) for g in in_glyphs)
-        display_out = " ".join(self.get_display_name(g) for g in out_glyphs)
-
-        self._add_to_result_map(
-            tag, in_chars, out_chars, display_in, display_out, langs, result_map
-        )
+        # Ligature components and multiple-substitution classes use their first glyph
+        first_glyphs = [glyph_class[0] for glyph_class in rule.input]
+        for glyph in rule.input[0] if len(rule.input) == 1 else first_glyphs[:1]:
+            self._add_to_result_map(
+                tag,
+                [glyph, *first_glyphs[1:]],
+                _replacement_for(rule, glyph),
+                langs,
+                result_map,
+            )
 
     def _process_ff_alternates(
         self,
@@ -501,17 +500,11 @@ class FontAnalyzer:
     ) -> None:
         """Add one substitution per alternate, selected by the feature value."""
         self.tags_with_alternates.add(tag)
-        in_glyph = rule.input[0][0]
-        in_char = self.get_glyph_info(in_glyph)[0]
-        display_in = self.get_display_name(in_glyph)
-
         for value, out_glyph in enumerate(rule.replacement[0], start=1):
             self._add_to_result_map(
                 tag,
-                in_char,
-                self.get_glyph_info(out_glyph)[0],
-                display_in,
-                self.get_display_name(out_glyph),
+                [rule.input[0][0]],
+                [out_glyph],
                 langs,
                 result_map,
                 feature_value=value,
@@ -524,74 +517,39 @@ class FontAnalyzer:
         langs: tuple[str, ...],
         result_map: dict[tuple[str, str, str], Substitution],
     ) -> None:
-        """Process a fontFeatures Chaining rule."""
-        # A chaining rule has precontext, input, and postcontext
-        # The 'input' is what gets substituted by lookups
-        in_seq = [g[0] for g in rule.input]
-        pre_seq = [g[0] for g in rule.precontext]
-        post_seq = [g[0] for g in rule.postcontext]
+        """Process a fontFeatures Chaining rule, shown with its context."""
+        precontext = [glyph_class[0] for glyph_class in rule.precontext]
+        postcontext = [glyph_class[0] for glyph_class in rule.postcontext]
 
-        out_seq = list(in_seq)
-        changed = False
-
-        for i, lookups in enumerate(rule.lookups):
-            if not lookups:
-                continue
-            for lookup in lookups:
-                actual_routine = (
-                    lookup.routine if hasattr(lookup, "routine") else lookup
+        for in_seq in _expand_chain_inputs(rule):
+            out_seq = _apply_chain_lookups(rule.lookups, in_seq)
+            if out_seq != in_seq:
+                self._add_to_result_map(
+                    tag,
+                    precontext + in_seq + postcontext,
+                    precontext + out_seq + postcontext,
+                    langs,
+                    result_map,
                 )
-                # Try to find a rule in the lookup that applies to this position
-                for sub_rule in actual_routine.rules:
-                    # Simple check: does the input of the sub_rule match our current glyph?
-                    # (Classes are simplified to first glyph)
-                    if (
-                        isinstance(sub_rule, FFSubstitution)
-                        and sub_rule.input[0][0] == in_seq[i]
-                    ):
-                        out_seq[i] = sub_rule.replacement[0][0]
-                        changed = True
-                        break
-                if changed:
-                    break
-
-        if changed:
-            # We show the whole sequence (pre + in + post)
-            full_in_glyphs = pre_seq + in_seq + post_seq
-            full_out_glyphs = pre_seq + out_seq + post_seq
-
-            # Skip if no actual change occurred in the full sequence
-            if full_in_glyphs == full_out_glyphs:
-                return
-
-            in_chars = "".join(self.get_glyph_info(g)[0] for g in full_in_glyphs)
-            out_chars = "".join(self.get_glyph_info(g)[0] for g in full_out_glyphs)
-
-            display_in = " ".join(self.get_display_name(g) for g in full_in_glyphs)
-            display_out = " ".join(self.get_display_name(g) for g in full_out_glyphs)
-
-            self._add_to_result_map(
-                tag, in_chars, out_chars, display_in, display_out, langs, result_map
-            )
 
     def _add_to_result_map(
         self,
         tag: str,
-        in_chars: str,
-        out_chars: str,
-        display_in: str,
-        display_out: str,
+        in_glyphs: list[str],
+        out_glyphs: list[str],
         langs: tuple[str, ...],
         result_map: dict[tuple[str, str, str], Substitution],
         feature_value: int = 1,
     ) -> None:
         """Add or combine a substitution in the result map."""
+        in_chars = "".join(self.get_glyph_info(g)[0] for g in in_glyphs)
+        out_chars = "".join(self.get_glyph_info(g)[0] for g in out_glyphs)
         key = (tag, in_chars, out_chars)
         if key not in result_map:
             result_map[key] = Substitution(
-                input_glyphs=display_in,
+                input_glyphs=" ".join(self.get_display_name(g) for g in in_glyphs),
                 input_chars=in_chars,
-                output_glyphs=display_out,
+                output_glyphs=" ".join(self.get_display_name(g) for g in out_glyphs),
                 output_chars=out_chars,
                 feature_tag=tag,
                 languages=langs,
@@ -921,6 +879,61 @@ def _is_alternate_substitution(rule: FFSubstitution) -> bool:
         and len(rule.input[0]) == 1
         and len(rule.replacement[0]) > 1
     )
+
+
+def _replacement_for(rule: FFSubstitution, first_glyph: str) -> list[str]:
+    """Return the glyphs a substitution produces for an input starting with first_glyph."""
+    input_class = rule.input[0]
+    if (
+        len(rule.input) == 1
+        and len(rule.replacement) == 1
+        and len(rule.replacement[0]) == len(input_class)
+    ):
+        return [rule.replacement[0][input_class.index(first_glyph)]]
+    return [glyph_class[0] for glyph_class in rule.replacement]
+
+
+def _match_substitution(
+    routine: Routine, glyphs: list[str]
+) -> tuple[int, list[str]] | None:
+    """Return the input length and output of the routine's rule matching glyphs."""
+    for rule in routine.rules:
+        if not isinstance(rule, FFSubstitution) or len(rule.input) > len(glyphs):
+            continue
+        window = glyphs[: len(rule.input)]
+        if all(g in cls for g, cls in zip(window, rule.input, strict=True)):
+            return len(rule.input), _replacement_for(rule, glyphs[0])
+    return None
+
+
+def _expand_chain_inputs(rule: Chaining) -> list[list[str]]:
+    """Return input sequences covering each glyph of the first substituted class."""
+    first_glyphs = [glyph_class[0] for glyph_class in rule.input]
+    position = next((i for i, lookups in enumerate(rule.lookups) if lookups), None)
+    if position is None:
+        return [first_glyphs]
+    return [
+        [*first_glyphs[:position], glyph, *first_glyphs[position + 1 :]]
+        for glyph in rule.input[position]
+    ]
+
+
+def _apply_chain_lookups(
+    lookups: list[list[RoutineReference | Routine] | None], in_seq: list[str]
+) -> list[str]:
+    """Apply the lookups of a chaining rule to an input sequence."""
+    parts = [[glyph] for glyph in in_seq]
+    for i, position_lookups in enumerate(lookups):
+        for lookup in position_lookups or []:
+            if len(parts[i]) != 1:  # consumed by a ligature or multiplied
+                break
+            routine = lookup.routine if isinstance(lookup, RoutineReference) else lookup
+            if routine is None:
+                continue
+            if match := _match_substitution(routine, [*parts[i], *in_seq[i + 1 :]]):
+                length, replacement = match
+                parts[i : i + length] = [replacement] + [[]] * (length - 1)
+    return [glyph for part in parts for glyph in part]
 
 
 def get_feature_priority(tag: str) -> tuple[int, str]:
