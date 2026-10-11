@@ -44,8 +44,8 @@ if TYPE_CHECKING:
 SUMMARY_TABLE_NAME = "opentype-features.tsv"
 
 logger = logging.getLogger(__name__)
-console = Console()
-error_console = Console(stderr=True)
+# Progress bars, logs and summaries share one console so that they do not interfere
+console = Console(stderr=True)
 
 app = App(help="Analyze the OpenType features of fonts and write PDF reports.")
 
@@ -138,10 +138,9 @@ def _progress() -> Progress:
         BarColumn(),
         MofNCompleteColumn(),
         TimeRemainingColumn(),
-        console=error_console,
+        console=console,
         transient=True,
-        disable=not error_console.is_terminal,
-        redirect_stdout=console.is_terminal,
+        disable=not console.is_terminal,
     )
 
 

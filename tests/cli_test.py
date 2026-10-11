@@ -159,7 +159,7 @@ def test_report_logs_unwritable_output(
     report([test_font])
 
     assert "Could not write the PDF report" in caplog.text
-    assert "No PDF report written" in capsys.readouterr().out
+    assert "No PDF report written" in capsys.readouterr().err
 
 
 def test_summary_lists_findings(test_font, in_tmp_path):
